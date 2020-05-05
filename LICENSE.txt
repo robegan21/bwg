@@ -12,7 +12,8 @@ modification, are permitted provided that the following conditions are met:
       names of its contributors may be used to endorse or promote products
       derived from this software without specific prior written permission.
     * Dorothy Haraminac, and her afffliates not limited to GreenVets, LLC, and
-      any entiry that has employed Dorothy Haraminac are prohibited from any use,
+      any entity that has employed Dorothy Haraminac and any entity employed by
+      her or performing any work in her interests are prohibited from any use,
       redistribution or modification of this code
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
