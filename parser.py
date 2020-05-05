@@ -81,6 +81,7 @@ def store_addr(addr, addr_json):
         #print(transaction)
     
 def load_addr(addr, wallet = None):
+    global last_request_time
     if addr in addresses:            
         print("Found ", addr, " in memory")
         return
@@ -100,23 +101,25 @@ def load_addr(addr, wallet = None):
         #    all_txs.extend(more_txs)
         #    addresses[addr]['txs'] = all_txs
 
-        cache = "addresses/%s.json" % (addr)
+        cache = "data/addresses/%s.json" % (addr)
         if offset > 0:
-            cache = "addresses/%s-%d.json" % (addr,offset)
+            cache = "data/addresses/%s-%d.json" % (addr,offset)
         print ("Checking for cached addr:", addr , "at offset", offset, "in", cache)
     
         if not os.path.exists(cache):
             url = lookup_addr_url + addr
             if offset > 0:
-                url += "&offset=%d" % (offset)
+                url += "?&limit=50&offset=%d" % (offset)
             wait_time = time.time() - last_request_time
             if wait_time < min_request_delay:
                 print("Waiting to make next URL API request: ", wait_time)
-                time.sleep(wait_time + 1)
+                time.sleep(min_request_delay)
             print("Downloading everything about ", addr, " from ", url)
             
+            # raise an error if we need to re-download some data to avoid getting blocked by blockchain.com while debugging
             raise("Where did %s come from?" % (addr))
             urllib.request.urlretrieve(url, cache)
+            last_request_time = time.time()
         with open(cache) as fh:
             tmp_addr_json = json.load(fh)
             if all_txs is None:
@@ -238,7 +241,7 @@ if __name__ == "__main__":
     G.add_node("Untracked")
     for f in args:
         print("Inspecting file: ", f);
-        wallet = f.split('.')[0]
+        wallet = os.path.basename(f).split('.')[0]
         G.add_node(wallet)
         print("Opening f=", f, " wallet=", wallet)
         with open(f) as fh:
