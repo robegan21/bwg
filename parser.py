@@ -17,6 +17,7 @@ min_request_delay = 15
 last_request_time = time.time()
 display_len = 6
 
+balances = dict()
 transactions = dict()
 def get_tx(txid):
     if txid in transactions:
@@ -181,7 +182,12 @@ def append_edge(G, inaddr2, outaddr2, xferval):
     else:
         edge['count'] += 1
         edge['weight'] += xferval
-    #edge['arrowsize'] = math.log10(edge['weight'])
+    
+    if not unknown in inaddr2:
+        balances[inaddr2] -= xferval
+    if not unknown in outaddr2:
+        balances[outaddr2] += xferval
+
 
 min_val = 0.001
 def add_tx_to_graph(G, txid):
@@ -189,6 +195,7 @@ def add_tx_to_graph(G, txid):
     orig_in, orig_outs, fee, time = tx
     tx = sanitize_addr(tx)
     print("Adding ", txid, " ", tx)
+    has_unknown = None
     ins, outs, fee, time = tx
     for i in ins:
         inaddr, inval = i
@@ -200,21 +207,35 @@ def add_tx_to_graph(G, txid):
             if outval <= 0:
                 continue
             if inaddr == unknown and outaddr == unknown:
+                # neither address is tracked
+                # do not display
                 continue
+
             #print("out:", (outaddr, outval))
             if inaddr == unknown:
-                for x in orig_in:
-                    print("unknown from: ", x)
+                if outaddr[0] == '@':
+                    # unknown -> thirdparty destination
+                    # do not display
+                    continue 
+                has_unknown = "FROM"
                 inaddr2 = "From " + unknown
             else:
                 inaddr2 = inaddr
                 
             if outaddr == unknown:
-                continue
+                if inaddr[0] == '@':
+                    # thirdpaty -> unknown destination
+                    # do not display
+                    continue
+                has_unknown = "TO"
                 outaddr2 = "To " + unknown
             else:
                 outaddr2 = outaddr
                 
+            if inaddr2 == outaddr2:
+                # noop transaction
+                break
+            
             if inval <= outval:
                 xferval = inval
                 if xferval > min_val:
@@ -232,17 +253,33 @@ def add_tx_to_graph(G, txid):
                     #G.add_edge(inaddr2, outaddr2, weight=xferval, time=time)
                 inval -= xferval
                 outval = 0
+    if has_unknown is not None:
+        print("unknown", has_unknown, ": ", orig_in, " => ", orig_outs)
 
 if __name__ == "__main__":
     # remove the .py from this script as the hipmer wrapper needs to be excecuted for proper environment variable detection
     args = sys.argv[1:]
+    
     G = nx.DiGraph()
     #G.add_node(unknown, wallet="Untracked")
-    G.add_node("Untracked")
+    own_nodes = []
+    not_own_nodes = []
+    
     for f in args:
         print("Inspecting file: ", f);
-        wallet = os.path.basename(f).split('.')[0]
-        G.add_node(wallet)
+        wallet = os.path.basename(f)
+        wallet, ignored = os.path.splitext(wallet)
+    
+        G.add_node(wallet, input = 0, output = 0)
+        balances[wallet] = 0.0
+        
+        if wallet[0] == '@':
+            # not owned
+            not_own_nodes.append(wallet)
+        else:
+            # owned
+            own_nodes.append(wallet)
+        
         print("Opening f=", f, " wallet=", wallet)
         with open(f) as fh:
             for addr in fh.readlines():
@@ -252,7 +289,17 @@ if __name__ == "__main__":
                 #print(json.dumps(addresses[addr], sort_keys=True, indent=2))
     for txid in transactions.keys():
         add_tx_to_graph(G, txid)
+    
+    ownG = G.subgraph(own_nodes)
 
+    # add balance labels to fully tracked nodes
+    for n in G.nodes:
+        if unknown in n:
+            continue
+        print(n, balances[n])
+        if str(n)[0] != '@':
+            G.nodes[n]['net'] = balances[n]
+    
     print("Graph:", G)
     print("\tnodes:", G.nodes)
     print("\tnodes.data:", G.nodes.data())
@@ -263,7 +310,11 @@ if __name__ == "__main__":
     pos = nx.nx_agraph.graphviz_layout(G)
     nx.draw(G, pos=pos)
     write_dot(G, 'file.dot')
-    
+
+    pos = nx.nx_agraph.graphviz_layout(ownG)
+    nx.draw(ownG, pos=pos)
+    write_dot(ownG, 'file-own.dot')
+
     #import matplotlib.pyplot as plt
     #plt.subplot()
     #nx.draw(G, with_labels=True, font_weight='bold')
