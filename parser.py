@@ -92,17 +92,25 @@ def store_addr(addr, addr_json):
             raise
         #print(transaction)
     
-def load_addr(addr, wallet = None):
+def load_addr(addr, wallet = None, get_all_tx = True):
     global last_request_time
     if addr in addresses:            
         print("Found ", addr, " in memory")
         return
     
+    is_own = True
+    if wallet is not None and wallet[0] == '@':
+        is_own = False
     n_tx = 0
     all_txs = None
     offset = 0
     addr_json = None
+    max_n_tx = 10000 # some addresses have 10000s of transactions and we can not download them all
+    if (not is_own) or (not get_all_tx): # do not need to track every transaction that only just touched own wallet
+        max_n_tx = 50
     while offset == 0 or n_tx > len(all_txs):
+        if offset > max_n_tx:
+            break # blockchain won't respond to this excessively used address
         
         #n_txs = test_addr['n_tx']
         #all_txs = test_addr['txs']
@@ -124,12 +132,13 @@ def load_addr(addr, wallet = None):
                 url += "?&limit=50&offset=%d" % (offset)
             wait_time = time.time() - last_request_time
             if wait_time < min_request_delay:
+                wait_time = min_request_delay - wait_time
                 print("Waiting to make next URL API request: ", wait_time)
-                time.sleep(min_request_delay - wait_time)
+                time.sleep(wait_time)
             print("Downloading everything about ", addr, " from ", url)
             
             # raise an error if we need to re-download some data to avoid getting blocked by blockchain.com while debugging
-            raise("Where did %s come from?" % (addr))
+            # raise("Where did %s come from?" % (addr))
             urllib.request.urlretrieve(url, cache)
             last_request_time = time.time()
         with open(cache) as fh:
@@ -147,8 +156,9 @@ def load_addr(addr, wallet = None):
             n_tx = addr_json['n_tx']
         print("Found", addr, "with", n_tx, "transactions")
     
-    assert(n_tx == addr_json['n_tx'])
-    assert(n_tx == len(addr_json['txs']))
+    if n_tx < max_n_tx:
+        assert(n_tx == addr_json['n_tx'])
+        assert(n_tx == len(addr_json['txs']))
     store_addr(addr, addr_json)
         
     if by_wallet and wallet is not None:
@@ -372,7 +382,12 @@ if __name__ == "__main__":
         with open(f) as fh:
             for addr in fh.readlines():
                 addr = addr.strip();            
-                txs = load_addr(addr, wallet)
+                get_all_tx = True
+                if addr[0] == '#':
+                    # do not exhastively lookup all transactions
+                    addr = addr[1:]
+                    get_all_tx = False
+                txs = load_addr(addr, wallet, get_all_tx)
                 if not by_wallet:
                     G.add_node(addr, wallet=wallet)
                     if not is_own:
@@ -409,7 +424,27 @@ if __name__ == "__main__":
         sc = own_subgraph.get_subgraph(scname)
         for node in subclusters[name]:
             sc.add_node(node)
+    
+    # do same for not-own clusters / subgraphs
+    subclusters = dict()
+    notown_cluster = []
+    for node in not_own_nodes:
+        x = node.split('-')
+        if len(x) > 1:
+            print("Adding subcluster", x[0], x[1])
+            y = x[1]
+            if y not in subclusters:
+                subclusters[y] = []
+            subclusters[y].append(node)
+        else:
+            own_subgraph.add_node(node)
         
+    for name in subclusters.keys():
+        scname = "cluster_%s"%(name)
+        thirdParty.add_subgraph(subclusters[name], name=scname, label=name)
+        sc = thirdParty.get_subgraph(scname)
+        for node in subclusters[name]:
+            sc.add_node(node)
 
 
  
