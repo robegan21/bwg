@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import networkx as nx
+import pygraphviz as pgv
 import json
 import sys
 import os
@@ -124,7 +125,7 @@ def load_addr(addr, wallet = None):
             wait_time = time.time() - last_request_time
             if wait_time < min_request_delay:
                 print("Waiting to make next URL API request: ", wait_time)
-                time.sleep(min_request_delay)
+                time.sleep(min_request_delay - wait_time)
             print("Downloading everything about ", addr, " from ", url)
             
             # raise an error if we need to re-download some data to avoid getting blocked by blockchain.com while debugging
@@ -194,13 +195,13 @@ def record_balances(inaddr2, outaddr2, xferval):
     
 def append_edge(G, inaddr2, outaddr2, xferval):
     G.add_edge(inaddr2, outaddr2)
-    edge =  G[inaddr2][outaddr2]
+    edge =  G.get_edge(inaddr2, outaddr2)
     if not 'count' in edge:
-        edge['count'] = 1
-        edge['weight'] = xferval
+        edge.attr['count'] = 1
+        edge.attr['weight'] = xferval
     else:
-        edge['count'] += 1
-        edge['weight'] += xferval
+        edge.attr['count'] += 1
+        edge.artr['weight'] += xferval
     
 
 
@@ -336,7 +337,13 @@ if __name__ == "__main__":
     set_balances(newcoin_wallet)
     set_balances(COINBASE)
 
-    G = nx.DiGraph()
+    #G = nx.DiGraph()
+    #Gown = nx.DiGraph()
+    #G.add_node(Gown)
+    G = pgv.AGraph(directed=True)
+    G.add_subgraph(name="cluster_ThirdParty", label="ThirdParty")
+    thirdParty = G.get_subgraph("cluster_ThirdParty")
+    
     if by_wallet:
         G.add_node(newcoin_wallet)
     else:
@@ -353,8 +360,9 @@ if __name__ == "__main__":
         is_own = wallet[0] != '@'
         if by_wallet:
             G.add_node(wallet)
+            if not is_own:
+                thirdParty.add_node(wallet)
             set_balances(wallet)
-        
             if is_own:
                 own_nodes.append(wallet)
             else:
@@ -367,45 +375,84 @@ if __name__ == "__main__":
                 txs = load_addr(addr, wallet)
                 if not by_wallet:
                     G.add_node(addr, wallet=wallet)
+                    if not is_own:
+                        thirdParty.add_node(addr)
                     set_balances(addr)
-                if is_own:
-                    own_nodes.append(addr)
-                else:
-                    not_own_nodes.append(addr)
+                    if is_own:
+                        own_nodes.append(addr)
+                    else:
+                        not_own_nodes.append(addr)
                 #G.add_node(addr[0:display_len], wallet=wallet)
                 #print(json.dumps(addresses[addr], sort_keys=True, indent=2))
     for txid in transactions.keys():
         add_tx_to_graph(G, txid)
+      
+    G.add_subgraph(name="cluster_OWN", label="OWN")
+    own_subgraph = G.get_subgraph("cluster_OWN")
     
-    ownG = G.subgraph(own_nodes)
+    subclusters = dict()
+    own_cluster = []
+    for node in own_nodes:
+        x = node.split('-')
+        if len(x) > 1:
+            print("Adding subcluster", x[0], x[1])
+            y = x[1]
+            if y not in subclusters:
+                subclusters[y] = []
+            subclusters[y].append(node)
+        else:
+            own_subgraph.add_node(node)
+            
+    for name in subclusters.keys():
+        scname = "cluster_%s"%(name)
+        own_subgraph.add_subgraph(subclusters[name], name=scname, label=name)
+        sc = own_subgraph.get_subgraph(scname)
+        for node in subclusters[name]:
+            sc.add_node(node)
+        
 
+
+ 
     # add balance labels to fully tracked nodes
-    for n in G.nodes:
+    for n in G.nodes():
         if unknown in n:
             continue
-        if balances[n] < min_val:
-            balances[n] = 0
-        print(n, balances[n])
-        if str(n)[0] != '@':
-            G.nodes[n]['net'] = balances[n]
-            G.nodes[n]['input'] = inputs[n]
-            G.nodes[n]['output'] = outputs[n]
-            G.nodes[n]['label'] = "%s\n%0.3f" % (n, balances[n])
+        if n in balances:
+            if balances[n] < min_val:
+                balances[n] = 0
+            print(n, balances[n])
+            if str(n)[0] != '@':
+                node = G.get_node(n)
+                node.attr['net'] = balances[n]
+                node.attr['input'] = inputs[n]
+                node.attr['output'] = outputs[n]
+                node.attr['label'] = "%s\n%0.3f" % (n, balances[n])
     
     print("Graph:", G)
     print("\tnodes:", G.nodes)
-    print("\tnodes.data:", G.nodes.data())
+    print("\tnodes.data:", G.nodes())
     print("\tedges:", G.edges)
-    print("\tedges.data:", G.edges.data())
+    print("\tedges.data:", G.edges())
     
-    from networkx.drawing.nx_pydot import write_dot
-    pos = nx.nx_agraph.graphviz_layout(G)
-    nx.draw(G, pos=pos)
-    write_dot(G, 'file.dot')
+    #from networkx.drawing.nx_pydot import write_dot
+    #pos = nx.nx_agraph.graphviz_layout(G)
+    #nx.draw(G, pos=pos)
+    #write_dot(G, 'file.dot')
+    G.write('file.dot')
+    tmp = G.copy()
+    for node in not_own_nodes:
+        tmp.delete_node(node)
+    tmp.write('file-own.dot')
+    
+    #pgvG = pgv.AGraph('file.dot')
+    #for own in own_nodes:
+    #    node = pgvG.get_node(own)
+    #    node.attr['name'] = "cluster_OWN"
+    #pgvG.write('file2.dot')
 
-    pos = nx.nx_agraph.graphviz_layout(ownG)
-    nx.draw(ownG, pos=pos)
-    write_dot(ownG, 'file-own.dot')
+    #pos = nx.nx_agraph.graphviz_layout(ownG)
+    #nx.draw(ownG, pos=pos)
+    #write_dot(ownG, 'file-own.dot')
 
     #import matplotlib.pyplot as plt
     #plt.subplot()
