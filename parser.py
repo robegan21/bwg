@@ -15,8 +15,13 @@ lookup_tx_url = "https://blockchain.info/rawtx/"
 satoshi = 100000000
 min_request_delay = 15
 last_request_time = time.time()
-display_len = 6
+display_len = 8
+by_wallet = True
+unknown = 'N/A'
+COINBASE = "NEW COINBASE (Newly Generated Coins)"
 
+inputs = dict()
+outputs = dict()
 balances = dict()
 transactions = dict()
 def get_tx(txid):
@@ -55,6 +60,11 @@ def parse_tx(rawtx):
             print('segwit output')
         total -= output['value']/satoshi
     fee = total
+    if len(ins) == 0 and fee < 0:
+        # special coinbase generation
+        ins.append( (COINBASE, -fee) )
+        fee = 0
+        print("COINBASE", outs)
     inoutfeetime = (ins, outs, fee, time)
     #print("parse_tx txid=", txid, " got:", inoutfee)
     transactions[txid] = inoutfeetime;
@@ -140,11 +150,11 @@ def load_addr(addr, wallet = None):
     assert(n_tx == len(addr_json['txs']))
     store_addr(addr, addr_json)
         
-    if wallet is not None:
+    if by_wallet and wallet is not None:
         add_to_wallet(wallet, addr)
     return addresses[addr]['txs']
     
-unknown = 'N/A'
+
 def sanitize_addr(tx):
     # sanitize for unknown
     #print(tx)
@@ -173,6 +183,15 @@ def sanitize_addr(tx):
         outs2.append((addr2, val))
     return (ins2, outs2, fee, time)
 
+def record_balances(inaddr2, outaddr2, xferval):
+    if not unknown in inaddr2:
+        balances[inaddr2] -= xferval
+        outputs[inaddr2] += xferval
+    if not unknown in outaddr2:
+        balances[outaddr2] += xferval
+        inputs[outaddr2] += xferval
+
+    
 def append_edge(G, inaddr2, outaddr2, xferval):
     G.add_edge(inaddr2, outaddr2)
     edge =  G[inaddr2][outaddr2]
@@ -183,84 +202,145 @@ def append_edge(G, inaddr2, outaddr2, xferval):
         edge['count'] += 1
         edge['weight'] += xferval
     
-    if not unknown in inaddr2:
-        balances[inaddr2] -= xferval
-    if not unknown in outaddr2:
-        balances[outaddr2] += xferval
 
 
-min_val = 0.001
+min_val = 0.01
 def add_tx_to_graph(G, txid):
     tx = transactions[txid]
     orig_in, orig_outs, fee, time = tx
     tx = sanitize_addr(tx)
-    print("Adding ", txid, " ", tx)
+    print("Adding transaction ", txid, " ", tx, 'original:', orig_in, orig_outs)
     has_unknown = None
+    known_in = dict()
+    known_out = dict()
+    total_xfer = 0
     ins, outs, fee, time = tx
+    invalues=dict()
+    outvalues=dict()
+    
+    # copy the input and output values
     for i in ins:
         inaddr, inval = i
+        if inaddr not in invalues:
+            invalues[inaddr] = 0
+        invalues[inaddr] += inval
+    for o in outs:
+        outaddr, outval = o
+        if outaddr not in outvalues:
+            outvalues[outaddr] = 0
+        outvalues[outaddr] += outval
+    
+    for i in ins:
+        inaddr, orig_inval = i
         #print("in:", (inaddr, inval))
-        if inval <= 0:
+        if invalues[inaddr] <= 0:
+            # no remaining amount in inaddr to send
             continue
+        inval = invalues[inaddr]
         for o in outs:
-            outaddr, outval = o
-            if outval <= 0:
+            assert(inval >= 0.0)
+            if inval == 0.0:
+                break
+            
+            outaddr, orig_outval = o
+            if outvalues[outaddr] <= 0:
+                # no remaining amount to receive
                 continue
+            outval = outvalues[outaddr]
+            
+            #print("out:", (outaddr, outval))
+            
+            # calculate the micro transaction between a single input and a single output address
+            xferval = outval
+            if inval <= outval:
+                xferval = inval
+            
+            outval -= xferval
+            inval -= xferval     
+            
+            invalues[inaddr] = inval
+            outvalues[outaddr] = outval
+            
+            record_balances(inaddr, outaddr, xferval)
+            
+            # we may modify the address labels if one side is unknown
+            inaddr2 = inaddr
+            outaddr2 = outaddr
+
+
+            
+            if inaddr2 == outaddr2:
+                # noop transaction do not add an edge
+                continue
+                
             if inaddr == unknown and outaddr == unknown:
                 # neither address is tracked
-                # do not display
+                # do not add an edge
                 continue
-
-            #print("out:", (outaddr, outval))
+                
             if inaddr == unknown:
                 if outaddr[0] == '@':
                     # unknown -> thirdparty destination
-                    # do not display
+                    # do not add an edge
                     continue 
+                # otherwise log it
                 has_unknown = "FROM"
                 inaddr2 = "From " + unknown
             else:
                 inaddr2 = inaddr
+                if inaddr2 not in known_in:
+                    known_in[inaddr2] = 0
+                known_in[inaddr2] -= xferval
                 
             if outaddr == unknown:
                 if inaddr[0] == '@':
                     # thirdpaty -> unknown destination
-                    # do not display
+                    # do not add an edge
                     continue
+                # otherwise log it
                 has_unknown = "TO"
                 outaddr2 = "To " + unknown
             else:
                 outaddr2 = outaddr
+                if outaddr2 not in known_out:
+                    known_out[outaddr2] = 0
+                known_out[outaddr2] += xferval
                 
-            if inaddr2 == outaddr2:
-                # noop transaction
-                break
-            
-            if inval <= outval:
-                xferval = inval
-                if xferval > min_val:
-                    print("add", inaddr2, outaddr2, xferval)
-                    append_edge(G, inaddr2, outaddr2, xferval)
-                    #G.add_edge(inaddr2, outaddr2, weight=xferval, time=time)
-                inval = 0
-                outval -= xferval
-                break # no more input get next one
+            if xferval >= min_val:
+                print("add edge", inaddr2, outaddr2, xferval)
+                append_edge(G, inaddr2, outaddr2, xferval)
             else:
-                xferval = outval
-                if xferval > min_val:
-                    print("add", inaddr2, outaddr2, xferval)
-                    append_edge(G, inaddr2, outaddr2, xferval)
-                    #G.add_edge(inaddr2, outaddr2, weight=xferval, time=time)
-                inval -= xferval
-                outval = 0
+                print("Skipped tiny edge", inaddr2, outaddr2, xferval)
+            total_xfer += xferval
+            
+    print("Added a total of ", total_xfer, " for this set of edges from", known_in, "to", known_out)
+
     if has_unknown is not None:
-        print("unknown", has_unknown, ": ", orig_in, " => ", orig_outs)
+        print("unknown", has_unknown, ": in=", known_in.keys(), " out=", known_out.keys(), "tx=", orig_in, " => ", orig_outs)
+
+def set_balances(wallet):
+    balances[wallet] = 0.0
+    inputs[wallet] = 0.0
+    outputs[wallet] = 0.0
 
 if __name__ == "__main__":
     # remove the .py from this script as the hipmer wrapper needs to be excecuted for proper environment variable detection
     args = sys.argv[1:]
+    if not by_wallet:
+        display_len = 50
     
+    # special case of coinbase "address"
+    newcoin_wallet = "@NewCoins"
+    addresses[COINBASE] = None
+    add_to_wallet(newcoin_wallet, COINBASE)
+    set_balances(newcoin_wallet)
+    set_balances(COINBASE)
+
     G = nx.DiGraph()
+    if by_wallet:
+        G.add_node(newcoin_wallet)
+    else:
+        G.add_node(COINBASE, wallet=newcoin_wallet)
     #G.add_node(unknown, wallet="Untracked")
     own_nodes = []
     not_own_nodes = []
@@ -270,21 +350,28 @@ if __name__ == "__main__":
         wallet = os.path.basename(f)
         wallet, ignored = os.path.splitext(wallet)
     
-        G.add_node(wallet, input = 0, output = 0)
-        balances[wallet] = 0.0
+        is_own = wallet[0] != '@'
+        if by_wallet:
+            G.add_node(wallet)
+            set_balances(wallet)
         
-        if wallet[0] == '@':
-            # not owned
-            not_own_nodes.append(wallet)
-        else:
-            # owned
-            own_nodes.append(wallet)
+            if is_own:
+                own_nodes.append(wallet)
+            else:
+                not_own_nodes.append(wallet)
         
         print("Opening f=", f, " wallet=", wallet)
         with open(f) as fh:
             for addr in fh.readlines():
                 addr = addr.strip();            
                 txs = load_addr(addr, wallet)
+                if not by_wallet:
+                    G.add_node(addr, wallet=wallet)
+                    set_balances(addr)
+                if is_own:
+                    own_nodes.append(addr)
+                else:
+                    not_own_nodes.append(addr)
                 #G.add_node(addr[0:display_len], wallet=wallet)
                 #print(json.dumps(addresses[addr], sort_keys=True, indent=2))
     for txid in transactions.keys():
@@ -296,9 +383,14 @@ if __name__ == "__main__":
     for n in G.nodes:
         if unknown in n:
             continue
+        if balances[n] < min_val:
+            balances[n] = 0
         print(n, balances[n])
         if str(n)[0] != '@':
             G.nodes[n]['net'] = balances[n]
+            G.nodes[n]['input'] = inputs[n]
+            G.nodes[n]['output'] = outputs[n]
+            G.nodes[n]['label'] = "%s\n%0.3f" % (n, balances[n])
     
     print("Graph:", G)
     print("\tnodes:", G.nodes)
