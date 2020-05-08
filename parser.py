@@ -1,6 +1,35 @@
 #!/usr/bin/env python3
+"""
+Copyright (c) 2020, Rob Egan
+All rights reserved.
 
-import networkx as nx
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the <organization> nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+    * Dorothy Haraminac, and any of her affliates not limited to GreenVets, LLC,
+      or any entity that has employed Dorothy Haraminac or any entity employed by
+      her or performing any work in her interests are prohibited from any use,
+      redistribution or modification of this code
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+"""
+
 import pygraphviz as pgv
 import json
 import sys
@@ -18,8 +47,12 @@ min_request_delay = 15
 last_request_time = time.time()
 display_len = 8
 by_wallet = True
-unknown = 'N/A'
+cluster_own = False
+cluster_thirdParty = True
+
+unknown = 'Not Tracked'
 COINBASE = "NEW COINBASE (Newly Generated Coins)"
+FEES = "TransactionFees"
 
 inputs = dict()
 outputs = dict()
@@ -36,7 +69,7 @@ def parse_tx(rawtx):
     if txid in transactions:
         return transactions[txid]
     
-    print(txid)
+    print("txid:", txid)
     #print(rawtx)
     outs = []
     ins = []
@@ -98,15 +131,12 @@ def load_addr(addr, wallet = None, get_all_tx = True):
         print("Found ", addr, " in memory")
         return
     
-    is_own = True
-    if wallet is not None and wallet[0] == '@':
-        is_own = False
     n_tx = 0
     all_txs = None
     offset = 0
     addr_json = None
     max_n_tx = 10000 # some addresses have 10000s of transactions and we can not download them all
-    if (not is_own) or (not get_all_tx): # do not need to track every transaction that only just touched own wallet
+    if not get_all_tx: # do not need to track every transaction that only just touched own wallet
         max_n_tx = 50
     while offset == 0 or n_tx > len(all_txs):
         if offset > max_n_tx:
@@ -172,40 +202,57 @@ def sanitize_addr(tx):
     ins, outs, fee, time = tx
     ins2 = []
     outs2 = []
+    from_self = False
+    to_self = False
     for i in ins:
         addr, val = i
         if not addr in addresses:
-            addr2 = unknown
+            addr = "From " + unknown
         else:
             if addr in rev_wallet:
-                addr2 = rev_wallet[addr]
+                addr = rev_wallet[addr]
+                if addr[0] != '@':
+                    from_self = True
             else:
-                addr2 = addr[0:display_len]
-        ins2.append((addr2, val))
+                addr = addr[0:display_len]
+        ins2.append((addr, val))
     for i in outs:
         addr, val = i
         if not addr in addresses:
-            addr2 = unknown
+            addr = "To " + unknown
         else:
             if addr in rev_wallet:
-                addr2 = rev_wallet[addr]
+                addr = rev_wallet[addr]
+                if addr[0] != '@':
+                     to_self = True
             else:
-                addr2 = addr[0:display_len]
-        outs2.append((addr2, val))
-    return (ins2, outs2, fee, time)
+                addr = addr[0:display_len]
+        outs2.append((addr, val))
+    return (ins2, outs2, fee, time), from_self, to_self
 
-def record_balances(inaddr2, outaddr2, xferval):
-    if not unknown in inaddr2:
-        balances[inaddr2] -= xferval
-        outputs[inaddr2] += xferval
-    if not unknown in outaddr2:
-        balances[outaddr2] += xferval
-        inputs[outaddr2] += xferval
+def record_balances(inaddr, outaddr, xferval, ownIn = False, ownOut = False):
+    if inaddr == outaddr:
+        return
+    if not unknown in inaddr:
+        balances[inaddr] -= xferval
+        if ownIn:
+            outputs[inaddr] += xferval
+            if not unknown in outaddr and not ownOut:
+                # also track input from other
+                inputs[outaddr] += xferval
+            
+    if not unknown in outaddr:
+        balances[outaddr] += xferval
+        if ownOut:
+            inputs[outaddr] += xferval
+            if not unknown in inaddr and not ownIn:
+                # also track output from other
+                outputs[inaddr] += xferval
 
     
-def append_edge(G, inaddr2, outaddr2, xferval):
-    G.add_edge(inaddr2, outaddr2)
-    edge =  G.get_edge(inaddr2, outaddr2)
+def append_edge(G, inaddr, outaddr, xferval):
+    G.add_edge(inaddr, outaddr)
+    edge =  G.get_edge(inaddr, outaddr)
     if not 'count' in edge:
         edge.attr['count'] = 1
         edge.attr['weight'] = xferval
@@ -219,13 +266,16 @@ min_val = 0.01
 def add_tx_to_graph(G, txid):
     tx = transactions[txid]
     orig_in, orig_outs, fee, time = tx
-    tx = sanitize_addr(tx)
-    print("Adding transaction ", txid, " ", tx, 'original:', orig_in, orig_outs)
+    tx, from_self, to_self = sanitize_addr(tx)
+    print("Adding transaction ", "From Self" if from_self else "", "To Self" if to_self else "", txid, " ", tx, 'original:', orig_in, orig_outs)
     has_unknown = None
     known_in = dict()
     known_out = dict()
     total_xfer = 0
     ins, outs, fee, time = tx
+    if from_self:
+        balances[FEES] -= fee
+        print("Applying transaction fee", fee, " total ", balances[FEES])
     invalues=dict()
     outvalues=dict()
     
@@ -272,56 +322,48 @@ def add_tx_to_graph(G, txid):
             invalues[inaddr] = inval
             outvalues[outaddr] = outval
             
-            record_balances(inaddr, outaddr, xferval)
-            
-            # we may modify the address labels if one side is unknown
-            inaddr2 = inaddr
-            outaddr2 = outaddr
-
-
-            
-            if inaddr2 == outaddr2:
-                # noop transaction do not add an edge
+            if inaddr == outaddr:
+                # noop transaction do not add an edge, change ins or outs or balances
                 continue
-                
+
             if inaddr == unknown and outaddr == unknown:
                 # neither address is tracked
-                # do not add an edge
+                # do not add an edge or track balances
                 continue
+
+            # At least some parts of this transaction are being tracked
+            record_balances(inaddr, outaddr, xferval, from_self, to_self)
+     
                 
-            if inaddr == unknown:
-                if outaddr[0] == '@':
+            if unknown in inaddr:
+                if unknown in outaddr or outaddr[0] == '@':
                     # unknown -> thirdparty destination
                     # do not add an edge
                     continue 
                 # otherwise log it
                 has_unknown = "FROM"
-                inaddr2 = "From " + unknown
             else:
-                inaddr2 = inaddr
-                if inaddr2 not in known_in:
-                    known_in[inaddr2] = 0
-                known_in[inaddr2] -= xferval
+                if inaddr not in known_in:
+                    known_in[inaddr] = 0
+                known_in[inaddr] -= xferval
                 
-            if outaddr == unknown:
-                if inaddr[0] == '@':
-                    # thirdpaty -> unknown destination
+            if unknown in outaddr:
+                if unknown in inaddr or inaddr[0] == '@':
+                    # unkown or thirdparty -> unknown destination
                     # do not add an edge
                     continue
                 # otherwise log it
                 has_unknown = "TO"
-                outaddr2 = "To " + unknown
             else:
-                outaddr2 = outaddr
-                if outaddr2 not in known_out:
-                    known_out[outaddr2] = 0
-                known_out[outaddr2] += xferval
+                if outaddr not in known_out:
+                    known_out[outaddr] = 0
+                known_out[outaddr] += xferval
                 
             if xferval >= min_val:
-                print("add edge", inaddr2, outaddr2, xferval)
-                append_edge(G, inaddr2, outaddr2, xferval)
+                print("add edge", inaddr, outaddr, xferval)
+                append_edge(G, inaddr, outaddr, xferval)
             else:
-                print("Skipped tiny edge", inaddr2, outaddr2, xferval)
+                print("Skipped tiny edge", inaddr, outaddr, xferval)
             total_xfer += xferval
             
     print("Added a total of ", total_xfer, " for this set of edges from", known_in, "to", known_out)
@@ -347,20 +389,35 @@ if __name__ == "__main__":
     set_balances(newcoin_wallet)
     set_balances(COINBASE)
 
-    #G = nx.DiGraph()
-    #Gown = nx.DiGraph()
-    #G.add_node(Gown)
-    G = pgv.AGraph(directed=True)
-    G.add_subgraph(name="cluster_ThirdParty", label="ThirdParty")
-    thirdParty = G.get_subgraph("cluster_ThirdParty")
+    own_nodes = []
+    not_own_nodes = []
+    G = pgv.AGraph(directed=True, landscape=False)
     
+    own_name = "cluster_OWN"
+    G.add_subgraph(name=own_name, label="OWN", style="filled", fillcolor="lightgrey")
+    own_subgraph = G.get_subgraph(own_name)
+
+    thirdParty_name = "ThirdParty"
+    G.add_subgraph(name=thirdParty_name, label="ThirdParty")
+    thirdParty_subgraph = G.get_subgraph(thirdParty_name)
+
+    own_subgraph.add_node(FEES)
+    set_balances(FEES)
+    own_nodes.append(FEES)
+
+    
+    # Origin / Coinbase are in neither OWN nor ThirdParty
     if by_wallet:
         G.add_node(newcoin_wallet)
     else:
         G.add_node(COINBASE, wallet=newcoin_wallet)
-    #G.add_node(unknown, wallet="Untracked")
-    own_nodes = []
-    not_own_nodes = []
+        
+    # untracked are in neither OWN nor ThirdParty
+    G.add_node("From " + unknown, wallet="Untracked")
+    set_balances("From " + unknown)
+    G.add_node("To " + unknown, wallet="Untracked")
+    set_balances("To " + unknown)
+    
     
     for f in args:
         print("Inspecting file: ", f);
@@ -368,11 +425,32 @@ if __name__ == "__main__":
         wallet, ignored = os.path.splitext(wallet)
     
         is_own = wallet[0] != '@'
+        topsubgraph = own_subgraph if is_own else thirdParty_subgraph
+        
+        # further subgraph is the wallet contains a dash
+        x = wallet.split('-')
+        if len(x) > 1:
+            name_id, name = wallet.split('-')
+            if is_own and cluster_own:
+                # impose drawing restrictions
+                subgraph_name = "cluster_" + name
+            elif cluster_thirdParty and not is_own:
+                subgraph_name = "cluster_" + name
+            else:
+                subgraph_name = name
+            subgraph = G.get_subgraph(subgraph_name)
+            if subgraph is None:
+                subgraph = topsubgraph.add_subgraph(subgraph_name, name=subgraph_name, label=name)
+                print("Created subgraph", name, "within", "OWN" if is_own else "ThirdParty")
+            print("wallet", wallet, "is of subgraph", name)
+        else:
+            subgraph = topsubgraph
+            print("wallet", wallet, "is", "OWN" if is_own else "ThirdParty")
+            
         if by_wallet:
-            G.add_node(wallet)
-            if not is_own:
-                thirdParty.add_node(wallet)
+            subgraph.add_node(wallet)
             set_balances(wallet)
+            
             if is_own:
                 own_nodes.append(wallet)
             else:
@@ -387,24 +465,27 @@ if __name__ == "__main__":
                     # do not exhastively lookup all transactions
                     addr = addr[1:]
                     get_all_tx = False
+                if not is_own:
+                    # not own, do not exhastively lookup all transactions
+                    get_all_tx = False
+                
                 txs = load_addr(addr, wallet, get_all_tx)
                 if not by_wallet:
-                    G.add_node(addr, wallet=wallet)
-                    if not is_own:
-                        thirdParty.add_node(addr)
+                    subgraph.add_node(addr, wallet=wallet)
                     set_balances(addr)
+
                     if is_own:
                         own_nodes.append(addr)
                     else:
                         not_own_nodes.append(addr)
+                    
                 #G.add_node(addr[0:display_len], wallet=wallet)
                 #print(json.dumps(addresses[addr], sort_keys=True, indent=2))
+    
     for txid in transactions.keys():
         add_tx_to_graph(G, txid)
-      
-    G.add_subgraph(name="cluster_OWN", label="OWN")
-    own_subgraph = G.get_subgraph("cluster_OWN")
     
+    """
     subclusters = dict()
     own_cluster = []
     for node in own_nodes:
@@ -415,15 +496,19 @@ if __name__ == "__main__":
             if y not in subclusters:
                 subclusters[y] = []
             subclusters[y].append(node)
-        else:
-            own_subgraph.add_node(node)
             
     for name in subclusters.keys():
-        scname = "cluster_%s"%(name)
+        if cluster_own:
+            # impose drawing constraints by name prefix cluster_
+            # Note: drawing constraints on own *clusters* make splines collide too much
+            scname = "cluster_%s" %(name)
+        else:
+            scname = name
         own_subgraph.add_subgraph(subclusters[name], name=scname, label=name)
         sc = own_subgraph.get_subgraph(scname)
         for node in subclusters[name]:
             sc.add_node(node)
+            print("Added", node, " to OWN subcluster", name)
     
     # do same for not-own clusters / subgraphs
     subclusters = dict()
@@ -436,16 +521,19 @@ if __name__ == "__main__":
             if y not in subclusters:
                 subclusters[y] = []
             subclusters[y].append(node)
-        else:
-            own_subgraph.add_node(node)
         
     for name in subclusters.keys():
-        scname = "cluster_%s"%(name)
-        thirdParty.add_subgraph(subclusters[name], name=scname, label=name)
-        sc = thirdParty.get_subgraph(scname)
+        if cluster_thirdParty:
+            # impose drawing constraints on thirdParty groups by naming prefix cluster_
+            scname = "cluster_%s"%(name)
+        else:
+            scname = name
+        G.add_subgraph(subclusters[name], name=scname, label=name)
+        sc = G.get_subgraph(scname)
         for node in subclusters[name]:
             sc.add_node(node)
-
+            print("Added", node, " to not-own subcluster", name)
+"""
 
  
     # add balance labels to fully tracked nodes
@@ -453,26 +541,60 @@ if __name__ == "__main__":
         if unknown in n:
             continue
         if n in balances:
-            if balances[n] < min_val:
-                balances[n] = 0
-            print(n, balances[n])
-            if str(n)[0] != '@':
-                node = G.get_node(n)
+            print(n, round(balances[n],3))
+            node = G.get_node(n)
+            is_own = str(n)[0] != '@'
+            if True:
                 node.attr['net'] = balances[n]
                 node.attr['input'] = inputs[n]
                 node.attr['output'] = outputs[n]
-                node.attr['label'] = "%s\n%0.3f" % (n, balances[n])
+                node.attr['label'] = '%s' % (n)
+                if inputs[n] > 0.0:
+                    node.attr['label'] += "\nin=%0.3f" % (inputs[n])
+                if outputs[n] > 0.0:
+                    node.attr['label'] += "\nout=%0.3f" % (outputs[n])
+                if is_own:
+                    node.attr['label'] += "\nbal=%0.3f" % (balances[n])
+
+                if is_own:
+                    # only color own wallets
+                    if balances[n] >= min_val:
+                        node.attr['color'] = 'green'
+                    elif round(balances[n],3) < 0.0:
+                        node.attr['color'] = 'red'
+                    else:
+                        node.attr['color'] = 'yellow'
+            else:
+                node.attr['color'] = 'blue'
     
+    for e in G.edges():
+        f,t = e
+        from_own = True if f in own_nodes else False
+        from_third = True if f in not_own_nodes else False
+        to_own = True if t in own_nodes else False
+        to_third = True if t in not_own_nodes else False
+        
+        if from_third and to_third :
+            # display this ThirdParty to Thirdparty edge as the value is not otherwise tracked
+            e.attr['label'] = e.attr['weight']
+            e.attr['color'] = 'purple'
+        elif from_own and to_own :
+            # Own to Own
+            e.attr['style'] = "dotted"
+        elif to_own:
+            # to Own
+            e.attr['color'] = 'green'
+        elif from_own:
+            # from Own
+            e.attr['color'] = 'red'
+        
+        
     print("Graph:", G)
     print("\tnodes:", G.nodes)
     print("\tnodes.data:", G.nodes())
     print("\tedges:", G.edges)
     print("\tedges.data:", G.edges())
     
-    #from networkx.drawing.nx_pydot import write_dot
-    #pos = nx.nx_agraph.graphviz_layout(G)
-    #nx.draw(G, pos=pos)
-    #write_dot(G, 'file.dot')
     G.write('file.dot')
     tmp = G.copy()
     for node in not_own_nodes:
@@ -485,14 +607,6 @@ if __name__ == "__main__":
     #    node.attr['name'] = "cluster_OWN"
     #pgvG.write('file2.dot')
 
-    #pos = nx.nx_agraph.graphviz_layout(ownG)
-    #nx.draw(ownG, pos=pos)
-    #write_dot(ownG, 'file-own.dot')
-
-    #import matplotlib.pyplot as plt
-    #plt.subplot()
-    #nx.draw(G, with_labels=True, font_weight='bold')
-    #plt.savefig("path.png")
     print('Finished')
   
 
