@@ -49,11 +49,22 @@ display_len = 8
 by_wallet = True
 cluster_own = False
 cluster_thirdParty = True
+verbose = False
+debug_mode = False
+suggest_irrelevant = False
+suggest_change = True
+suggest_thirdparty = True
+suggest_mergable = False
+label_3rdto3rd = True
+label_income = True
+label_expense = False
+max_date = None # 1587742790 / 3600.0 / 24.0 
 
 unknown = 'Not Tracked'
 COINBASE = "NEW COINBASE (Newly Generated Coins)"
 FEES = "TransactionFees"
 
+mergable_wallets = dict()
 inputs = dict()
 outputs = dict()
 balances = dict()
@@ -69,40 +80,43 @@ def parse_tx(rawtx):
     if txid in transactions:
         return transactions[txid]
     
-    print("txid:", txid)
-    #print(rawtx)
+    if verbose:
+        print("txid:", txid)
     outs = []
     ins = []
     fee = None
     total = 0
-    time = rawtx['time'] / 3600 / 24
+    time = rawtx['time'] / 3600.0 / 24.0
     for input in rawtx['inputs']:
         if 'prev_out' not in input:
             break # coinbase transaction
         prev_out = input['prev_out']
-        #print(prev_out)
         if 'addr' in prev_out: # segwit
             ins.append( (prev_out['addr'], prev_out['value']/satoshi) )
         else:
-            print("segwit input")
+            if verbose:
+                print("segwit input")
         total += prev_out['value']/satoshi
     for output in rawtx['out']:
-        #print(output)
         if 'addr' in output: # segwit
             outs.append( (output['addr'], output['value']/satoshi) )
         else:
-            print('segwit output')
+            if verbose:
+                print('segwit output')
         total -= output['value']/satoshi
     fee = total
     if len(ins) == 0 and fee < 0:
         # special coinbase generation
         ins.append( (COINBASE, -fee) )
         fee = 0
-        print("COINBASE", outs)
+        if verbose:
+            print("COINBASE", outs)
     inoutfeetime = (ins, outs, fee, time)
-    #print("parse_tx txid=", txid, " got:", inoutfee)
-    transactions[txid] = inoutfeetime;
-    return transactions[txid]
+    if max_date is None or time < max_date:
+        transactions[txid] = inoutfeetime
+    else:
+        print("Skipping transaction after max_date(", max_date, "), :", inoutfeetime)
+    return inoutfeetime
 
 wallets = dict()
 rev_wallet = dict()
@@ -111,25 +125,30 @@ def add_to_wallet(wallet, addr):
         wallets[wallet] = dict()
     wallets[wallet][addr] = True
     rev_wallet[addr] = wallet
-    #print("set ", addr, " to ", wallet)
     
 addresses = dict()
-def store_addr(addr, addr_json):
+def store_addr(addr, addr_json, wallet = None):
     assert( addr not in addresses )
     addresses[addr] = addr_json
-    for tx in addr_json['txs']:
-        try:
-            transaction = parse_tx(tx)
-        except:
-            print("Could not parse transaction: ", tx)
-            raise
-        #print(transaction)
+    if 'txs' in addr_json:
+        for tx in addr_json['txs']:
+            try:
+                transaction = parse_tx(tx)
+            except:
+                print("Could not parse transaction: ", tx)
+                raise
+    if by_wallet and wallet is not None:
+        add_to_wallet(wallet, addr)
     
-def load_addr(addr, wallet = None, get_all_tx = True):
+def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
     global last_request_time
     if addr in addresses:            
-        print("Found ", addr, " in memory")
+        if verbose:
+            print("Found ", addr, " in memory")
         return
+    if not get_any_tx:
+        store_addr(addr, dict(), wallet)
+        return []
     
     n_tx = 0
     all_txs = None
@@ -140,21 +159,13 @@ def load_addr(addr, wallet = None, get_all_tx = True):
         max_n_tx = 50
     while offset == 0 or n_tx > len(all_txs):
         if offset > max_n_tx:
-            break # blockchain won't respond to this excessively used address
-        
-        #n_txs = test_addr['n_tx']
-        #all_txs = test_addr['txs']
-        #while n_txs != len(all_txs):
-        #    print("Downloading missing transactions", n_txs - len(all_txs), " starting at", n_txs)
-        #    old_txs = test_addr['']
-        #    more_txs = load_addr(addr, wallet, num_txs)
-        #    all_txs.extend(more_txs)
-        #    addresses[addr]['txs'] = all_txs
+            break # blockchain won't respond to this excessively used addresses
 
         cache = "data/addresses/%s.json" % (addr)
         if offset > 0:
             cache = "data/addresses/%s-%d.json" % (addr,offset)
-        print ("Checking for cached addr:", addr , "at offset", offset, "in", cache)
+        if verbose:
+            print ("Checking for cached addr:", addr , "at offset", offset, "in", cache)
     
         if not os.path.exists(cache):
             url = lookup_addr_url + addr
@@ -168,7 +179,9 @@ def load_addr(addr, wallet = None, get_all_tx = True):
             print("Downloading everything about ", addr, " from ", url)
             
             # raise an error if we need to re-download some data to avoid getting blocked by blockchain.com while debugging
-            # raise("Where did %s come from?" % (addr))
+            if debug_mode:
+                raise "Where did addr=%s come from?" % (addr)
+            
             urllib.request.urlretrieve(url, cache)
             last_request_time = time.time()
         with open(cache) as fh:
@@ -177,57 +190,85 @@ def load_addr(addr, wallet = None, get_all_tx = True):
                 all_txs = tmp_addr_json['txs']
                 addr_json = tmp_addr_json
             else:
-                print("Extending existing transactions=",len(addr_json['txs']), "plus", len(tmp_addr_json['txs']))
+                if verbose:
+                    print("Extending existing transactions=",len(addr_json['txs']), "plus", len(tmp_addr_json['txs']))
                 all_txs.extend(tmp_addr_json['txs'])
                 addr_json['txs'] = all_txs
                 
         offset += len(tmp_addr_json['txs'])
         if n_tx == 0:
             n_tx = addr_json['n_tx']
-        print("Found", addr, "with", n_tx, "transactions")
+        if verbose:
+            print("Found", addr, "with", n_tx, "transactions")
     
     if n_tx < max_n_tx:
         assert(n_tx == addr_json['n_tx'])
         assert(n_tx == len(addr_json['txs']))
-    store_addr(addr, addr_json)
-        
-    if by_wallet and wallet is not None:
-        add_to_wallet(wallet, addr)
+    store_addr(addr, addr_json, wallet)
+
     return addresses[addr]['txs']
     
 
 def sanitize_addr(tx):
     # sanitize for unknown
-    #print(tx)
     ins, outs, fee, time = tx
     ins2 = []
     outs2 = []
     from_self = False
     to_self = False
+    known_in = None
+    known_out = None
+    unknown_in = []
+    unknown_out = []
+    
     for i in ins:
         addr, val = i
+        orig_addr = addr
         if not addr in addresses:
             addr = "From " + unknown
+            unknown_in.append(orig_addr)
         else:
             if addr in rev_wallet:
                 addr = rev_wallet[addr]
                 if addr[0] != '@':
                     from_self = True
+                if known_in is None:
+                    known_in = addr
+                if known_in != addr:
+                    if not from_self:
+                        print("WARNING: MIXED account: addr", orig_addr, "is from wallet", addr, "but other inputs are from wallet", known_in, ". tx:", tx)
+                    if from_self:
+                        if addr < known_in:
+                            mergable_wallets[addr + " and " + known_in] = True
+                        else:
+                            mergable_wallets[known_in + " and " + addr] = True
+                        if suggest_mergable:
+                            print("INFO: two OWN wallets share a transaction, this is okay but can be confusing:", addr, known_in, tx)
             else:
+                unknown_in.append(orig_addr)
                 addr = addr[0:display_len]
         ins2.append((addr, val))
     for i in outs:
         addr, val = i
+        orig_addr = addr
         if not addr in addresses:
             addr = "To " + unknown
+            unknown_out.append(orig_addr)
         else:
             if addr in rev_wallet:
                 addr = rev_wallet[addr]
                 if addr[0] != '@':
                      to_self = True
+                known_out = addr
             else:
                 addr = addr[0:display_len]
+                unknown_out.append(orig_addr)
         outs2.append((addr, val))
+    if known_in is not None and (known_in[0] != '@' or suggest_thirdparty):
+        if len(unknown_in) > 0 and (suggest_irrelevant or known_out is not None):
+            print("Suggestion: append associated addresses to", known_in, ":", unknown_in)
+        if len(outs) > 1 and len(unknown_out) == 1 and suggest_change and (suggest_irrelevant or known_out is not None):
+            print("Suggestion: perhaps this is a change address for", known_in, ":", unknown_out)
     return (ins2, outs2, fee, time), from_self, to_self
 
 def record_balances(inaddr, outaddr, xferval, ownIn = False, ownOut = False):
@@ -253,12 +294,13 @@ def record_balances(inaddr, outaddr, xferval, ownIn = False, ownOut = False):
 def append_edge(G, inaddr, outaddr, xferval):
     G.add_edge(inaddr, outaddr)
     edge =  G.get_edge(inaddr, outaddr)
-    if not 'count' in edge:
-        edge.attr['count'] = 1
-        edge.attr['weight'] = xferval
-    else:
-        edge.attr['count'] += 1
-        edge.artr['weight'] += xferval
+    # attributes are strings
+    if edge.attr['count'] is None or edge.attr['count'] == '':
+        #print("Initializing edge", edge)
+        edge.attr['count'] = "0"
+        edge.attr['weight'] = "0.0"
+    edge.attr['count'] = str(int(edge.attr['count']) + 1)
+    edge.attr['weight'] = str(float(edge.attr['weight']) + xferval)
     
 
 
@@ -267,7 +309,8 @@ def add_tx_to_graph(G, txid):
     tx = transactions[txid]
     orig_in, orig_outs, fee, time = tx
     tx, from_self, to_self = sanitize_addr(tx)
-    print("Adding transaction ", "From Self" if from_self else "", "To Self" if to_self else "", txid, " ", tx, 'original:', orig_in, orig_outs)
+    if verbose:
+        print("Adding transaction ", "From Self" if from_self else "", "To Self" if to_self else "", txid, " ", tx, 'original:', orig_in, orig_outs)
     has_unknown = None
     known_in = dict()
     known_out = dict()
@@ -275,7 +318,8 @@ def add_tx_to_graph(G, txid):
     ins, outs, fee, time = tx
     if from_self:
         balances[FEES] -= fee
-        print("Applying transaction fee", fee, " total ", balances[FEES])
+        if verbose:
+            print("Applying transaction fee", fee, " total ", balances[FEES])
     invalues=dict()
     outvalues=dict()
     
@@ -293,7 +337,6 @@ def add_tx_to_graph(G, txid):
     
     for i in ins:
         inaddr, orig_inval = i
-        #print("in:", (inaddr, inval))
         if invalues[inaddr] <= 0:
             # no remaining amount in inaddr to send
             continue
@@ -308,8 +351,6 @@ def add_tx_to_graph(G, txid):
                 # no remaining amount to receive
                 continue
             outval = outvalues[outaddr]
-            
-            #print("out:", (outaddr, outval))
             
             # calculate the micro transaction between a single input and a single output address
             xferval = outval
@@ -360,15 +401,17 @@ def add_tx_to_graph(G, txid):
                 known_out[outaddr] += xferval
                 
             if xferval >= min_val:
-                print("add edge", inaddr, outaddr, xferval)
+                if verbose:
+                    print("add edge", inaddr, outaddr, xferval)
                 append_edge(G, inaddr, outaddr, xferval)
             else:
-                print("Skipped tiny edge", inaddr, outaddr, xferval)
+                if verbose:
+                    print("Skipped tiny edge", inaddr, outaddr, xferval)
             total_xfer += xferval
             
     print("Added a total of ", total_xfer, " for this set of edges from", known_in, "to", known_out)
 
-    if has_unknown is not None:
+    if has_unknown is not None and total_xfer > min_val:
         print("unknown", has_unknown, ": in=", known_in.keys(), " out=", known_out.keys(), "tx=", orig_in, " => ", orig_outs)
 
 def set_balances(wallet):
@@ -461,15 +504,17 @@ if __name__ == "__main__":
             for addr in fh.readlines():
                 addr = addr.strip();            
                 get_all_tx = True
+                get_any_tx = True
                 if addr[0] == '#':
-                    # do not exhastively lookup all transactions
+                    # do not lookup any transactions
                     addr = addr[1:]
                     get_all_tx = False
+                    get_any_tx = False
                 if not is_own:
                     # not own, do not exhastively lookup all transactions
                     get_all_tx = False
                 
-                txs = load_addr(addr, wallet, get_all_tx)
+                txs = load_addr(addr, wallet, get_all_tx, get_any_tx)
                 if not by_wallet:
                     subgraph.add_node(addr, wallet=wallet)
                     set_balances(addr)
@@ -484,57 +529,6 @@ if __name__ == "__main__":
     
     for txid in transactions.keys():
         add_tx_to_graph(G, txid)
-    
-    """
-    subclusters = dict()
-    own_cluster = []
-    for node in own_nodes:
-        x = node.split('-')
-        if len(x) > 1:
-            print("Adding subcluster", x[0], x[1])
-            y = x[1]
-            if y not in subclusters:
-                subclusters[y] = []
-            subclusters[y].append(node)
-            
-    for name in subclusters.keys():
-        if cluster_own:
-            # impose drawing constraints by name prefix cluster_
-            # Note: drawing constraints on own *clusters* make splines collide too much
-            scname = "cluster_%s" %(name)
-        else:
-            scname = name
-        own_subgraph.add_subgraph(subclusters[name], name=scname, label=name)
-        sc = own_subgraph.get_subgraph(scname)
-        for node in subclusters[name]:
-            sc.add_node(node)
-            print("Added", node, " to OWN subcluster", name)
-    
-    # do same for not-own clusters / subgraphs
-    subclusters = dict()
-    notown_cluster = []
-    for node in not_own_nodes:
-        x = node.split('-')
-        if len(x) > 1:
-            print("Adding subcluster", x[0], x[1])
-            y = x[1]
-            if y not in subclusters:
-                subclusters[y] = []
-            subclusters[y].append(node)
-        
-    for name in subclusters.keys():
-        if cluster_thirdParty:
-            # impose drawing constraints on thirdParty groups by naming prefix cluster_
-            scname = "cluster_%s"%(name)
-        else:
-            scname = name
-        G.add_subgraph(subclusters[name], name=scname, label=name)
-        sc = G.get_subgraph(scname)
-        for node in subclusters[name]:
-            sc.add_node(node)
-            print("Added", node, " to not-own subcluster", name)
-"""
-
  
     # add balance labels to fully tracked nodes
     for n in G.nodes():
@@ -576,30 +570,43 @@ if __name__ == "__main__":
         
         if from_third and to_third :
             # display this ThirdParty to Thirdparty edge as the value is not otherwise tracked
-            e.attr['label'] = e.attr['weight']
+            if label_3rdto3rd:
+                e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
+                e.attr['fontcolor'] = 'purple'
             e.attr['color'] = 'purple'
         elif from_own and to_own :
             # Own to Own
             e.attr['style'] = "dotted"
         elif to_own:
             # to Own
+            if label_income:
+                e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
+                e.attr['fontcolor'] = 'green'
             e.attr['color'] = 'green'
         elif from_own:
             # from Own
+            if label_expense:
+                e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
+                e.attr['fontcolor'] = 'red'
             e.attr['color'] = 'red'
         
-        
-    print("Graph:", G)
-    print("\tnodes:", G.nodes)
-    print("\tnodes.data:", G.nodes())
-    print("\tedges:", G.edges)
-    print("\tedges.data:", G.edges())
+    if verbose:
+        print("Graph:", G)
+        print("\tnodes:", G.nodes)
+        print("\tnodes.data:", G.nodes())
+        print("\tedges:", G.edges)
+        print("\tedges.data:", G.edges())
+    
+    for mergable in mergable_wallets.keys():
+        print("Simplification suggestion merge these OWN wallets:", mergable)
     
     G.write('file.dot')
     tmp = G.copy()
     for node in not_own_nodes:
         tmp.delete_node(node)
     tmp.write('file-own.dot')
+    
+    tmp = G.copy()
     
     #pgvG = pgv.AGraph('file.dot')
     #for own in own_nodes:
