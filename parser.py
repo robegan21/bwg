@@ -43,6 +43,7 @@ lookup_addr_url= "https://blockchain.info/rawaddr/"
 lookup_tx_url = "https://blockchain.info/rawtx/"
 
 satoshi = 100000000
+min_draw_val = 0.001
 min_request_delay = 15
 last_request_time = time.time()
 display_len = 8
@@ -53,11 +54,11 @@ verbose = False
 debug_mode = False
 suggest_irrelevant = False
 suggest_change = True
-suggest_thirdparty = True
+suggest_thirdparty = False
 suggest_mergable = False
 label_3rdto3rd = True
 label_income = True
-label_expense = False
+label_expense = True
 max_date = None # 1587742790 / 3600.0 / 24.0 
 
 unknown = 'Not Tracked'
@@ -291,7 +292,7 @@ def record_balances(inaddr, outaddr, xferval, ownIn = False, ownOut = False):
                 outputs[inaddr] += xferval
 
     
-def append_edge(G, inaddr, outaddr, xferval):
+def append_edge(G, inaddr, outaddr, xferval, count = 1):
     G.add_edge(inaddr, outaddr)
     edge =  G.get_edge(inaddr, outaddr)
     # attributes are strings
@@ -299,12 +300,11 @@ def append_edge(G, inaddr, outaddr, xferval):
         #print("Initializing edge", edge)
         edge.attr['count'] = "0"
         edge.attr['weight'] = "0.0"
-    edge.attr['count'] = str(int(edge.attr['count']) + 1)
+    edge.attr['count'] = str(int(edge.attr['count']) + count)
     edge.attr['weight'] = str(float(edge.attr['weight']) + xferval)
     
 
 
-min_val = 0.01
 def add_tx_to_graph(G, txid):
     tx = transactions[txid]
     orig_in, orig_outs, fee, time = tx
@@ -400,7 +400,7 @@ def add_tx_to_graph(G, txid):
                     known_out[outaddr] = 0
                 known_out[outaddr] += xferval
                 
-            if xferval >= min_val:
+            if xferval >= min_draw_val:
                 if verbose:
                     print("add edge", inaddr, outaddr, xferval)
                 append_edge(G, inaddr, outaddr, xferval)
@@ -411,7 +411,7 @@ def add_tx_to_graph(G, txid):
             
     print("Added a total of ", total_xfer, " for this set of edges from", known_in, "to", known_out)
 
-    if has_unknown is not None and total_xfer > min_val:
+    if has_unknown is not None and total_xfer > min_draw_val:
         print("unknown", has_unknown, ": in=", known_in.keys(), " out=", known_out.keys(), "tx=", orig_in, " => ", orig_outs)
 
 def set_balances(wallet):
@@ -419,6 +419,60 @@ def set_balances(wallet):
     inputs[wallet] = 0.0
     outputs[wallet] = 0.0
 
+def set_node_labels(G, n):
+    node = G.get_node(n)
+    is_own = str(n)[0] != '@'
+    if True:
+        node.attr['input'] = inputs[n]
+        node.attr['output'] = outputs[n]
+        node.attr['label'] = '%s' % (n)
+        if inputs[n] > 0.0:
+            node.attr['label'] += "\nin=%0.3f" % (inputs[n])
+        if outputs[n] > 0.0:
+            node.attr['label'] += "\nout=%0.3f" % (outputs[n])
+        if is_own and unknown not in n:
+            node.attr['label'] += "\nbal=%0.3f" % (balances[n])
+
+        if is_own and unknown not in n:
+            # only color own wallets
+            if balances[n] >= min_draw_val:
+                node.attr['color'] = 'green'
+            elif round(balances[n],3) < 0.0:
+                node.attr['color'] = 'red'
+            else:
+                node.attr['color'] = 'yellow'
+    else:
+        node.attr['color'] = 'blue'
+
+def set_edge_labels(G, e, own_nodes, not_own_nodes):
+    f,t = e
+    from_own = True if f in own_nodes else False
+    from_third = True if f in not_own_nodes else False
+    to_own = True if t in own_nodes else False
+    to_third = True if t in not_own_nodes else False
+        
+    if from_third and to_third :
+        # display this ThirdParty to Thirdparty edge as the value is not otherwise tracked
+        if label_3rdto3rd:
+            e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
+            e.attr['fontcolor'] = 'purple'
+        e.attr['color'] = 'purple'
+    elif from_own and to_own :
+        # Own to Own
+        e.attr['style'] = "dotted"
+    elif to_own:
+        # to Own
+        if label_income:
+            e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
+            e.attr['fontcolor'] = 'green'
+        e.attr['color'] = 'green'
+    elif from_own:
+        # from Own
+        if label_expense:
+            e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
+            e.attr['fontcolor'] = 'red'
+        e.attr['color'] = 'red'
+    
 if __name__ == "__main__":
     # remove the .py from this script as the hipmer wrapper needs to be excecuted for proper environment variable detection
     args = sys.argv[1:]
@@ -458,8 +512,10 @@ if __name__ == "__main__":
     # untracked are in neither OWN nor ThirdParty
     G.add_node("From " + unknown, wallet="Untracked")
     set_balances("From " + unknown)
+    from_unknown_node = G.get_node("From " + unknown)
     G.add_node("To " + unknown, wallet="Untracked")
     set_balances("To " + unknown)
+    to_unknown_node = G.get_node("To " + unknown)
     
     
     for f in args:
@@ -499,6 +555,7 @@ if __name__ == "__main__":
             else:
                 not_own_nodes.append(wallet)
         
+        wallet_addresses = []
         print("Opening f=", f, " wallet=", wallet)
         with open(f) as fh:
             for addr in fh.readlines():
@@ -523,9 +580,12 @@ if __name__ == "__main__":
                         own_nodes.append(addr)
                     else:
                         not_own_nodes.append(addr)
-                    
-                #G.add_node(addr[0:display_len], wallet=wallet)
-                #print(json.dumps(addresses[addr], sort_keys=True, indent=2))
+                else:
+                    wallet_addresses.append(addr)
+        
+        if by_wallet and len(wallet_addresses) > 0:
+            n = G.get_node(wallet)
+            n.attr['addresses'] = ",".join(wallet_addresses)
     
     for txid in transactions.keys():
         add_tx_to_graph(G, txid)
@@ -535,60 +595,11 @@ if __name__ == "__main__":
         if unknown in n:
             continue
         if n in balances:
-            print(n, round(balances[n],3))
-            node = G.get_node(n)
-            is_own = str(n)[0] != '@'
-            if True:
-                node.attr['net'] = balances[n]
-                node.attr['input'] = inputs[n]
-                node.attr['output'] = outputs[n]
-                node.attr['label'] = '%s' % (n)
-                if inputs[n] > 0.0:
-                    node.attr['label'] += "\nin=%0.3f" % (inputs[n])
-                if outputs[n] > 0.0:
-                    node.attr['label'] += "\nout=%0.3f" % (outputs[n])
-                if is_own:
-                    node.attr['label'] += "\nbal=%0.3f" % (balances[n])
-
-                if is_own:
-                    # only color own wallets
-                    if balances[n] >= min_val:
-                        node.attr['color'] = 'green'
-                    elif round(balances[n],3) < 0.0:
-                        node.attr['color'] = 'red'
-                    else:
-                        node.attr['color'] = 'yellow'
-            else:
-                node.attr['color'] = 'blue'
+            print("Balance for", n, round(balances[n],3))
+            set_node_labels(G, n)
     
     for e in G.edges():
-        f,t = e
-        from_own = True if f in own_nodes else False
-        from_third = True if f in not_own_nodes else False
-        to_own = True if t in own_nodes else False
-        to_third = True if t in not_own_nodes else False
-        
-        if from_third and to_third :
-            # display this ThirdParty to Thirdparty edge as the value is not otherwise tracked
-            if label_3rdto3rd:
-                e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
-                e.attr['fontcolor'] = 'purple'
-            e.attr['color'] = 'purple'
-        elif from_own and to_own :
-            # Own to Own
-            e.attr['style'] = "dotted"
-        elif to_own:
-            # to Own
-            if label_income:
-                e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
-                e.attr['fontcolor'] = 'green'
-            e.attr['color'] = 'green'
-        elif from_own:
-            # from Own
-            if label_expense:
-                e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
-                e.attr['fontcolor'] = 'red'
-            e.attr['color'] = 'red'
+        set_edge_labels(G, e, own_nodes, not_own_nodes)
         
     if verbose:
         print("Graph:", G)
@@ -600,19 +611,114 @@ if __name__ == "__main__":
     for mergable in mergable_wallets.keys():
         print("Simplification suggestion merge these OWN wallets:", mergable)
     
+    set_node_labels(G,to_unknown_node)
+    set_node_labels(G,from_unknown_node)
+    
+    print("Writing full graph: file.dot")
     G.write('file.dot')
-    tmp = G.copy()
-    for node in not_own_nodes:
-        tmp.delete_node(node)
-    tmp.write('file-own.dot')
     
-    tmp = G.copy()
+    # cache full graph and from/to unknown values
+    backup = G.copy()
+    old_to_inputs = inputs[to_unknown_node]
+    old_from_outputs = outputs[from_unknown_node]
+
+    # remove all thirdparty nodes and create graph of just OWN connections
+    print("Removing all third party nodes from the graph")
     
-    #pgvG = pgv.AGraph('file.dot')
-    #for own in own_nodes:
-    #    node = pgvG.get_node(own)
-    #    node.attr['name'] = "cluster_OWN"
-    #pgvG.write('file2.dot')
+    third_party_nodes = thirdParty_subgraph.nodes()
+    third_party_edges = G.edges(third_party_nodes)
+    
+    for edge in third_party_edges:
+        f,t = edge
+        count = edge.attr['count']
+        weight = edge.attr['weight']
+        if verbose:
+            print("Looking at ", f, t)
+        if f[0] != '@':
+            # from own
+            append_edge(G, f, to_unknown_node, float(weight), int(count))
+            inputs[to_unknown_node] += float(weight)
+            if verbose:
+                print("from own", f, float(weight))
+        if t[0] != '@':
+            # to own
+            append_edge(G, from_unknown_node, t, float(weight), int(count))
+            outputs[from_unknown_node] += float(weight)
+            if verbose:
+                print("to own", t, float(weight))
+
+    # remove the thirdparty subgraphs too
+    del_sub = G.get_subgraph("ThirdParty")
+
+    G.delete_subgraph(del_sub.name)
+    for node in third_party_nodes:
+        if verbose:
+            print("Deleting", node)
+        G.delete_node(node)
+    for edge in G.edges():
+        set_edge_labels(G, edge, own_nodes, [])
+    set_node_labels(G,to_unknown_node)
+    set_node_labels(G,from_unknown_node)
+    print("Writing file-own.dot")
+    G.write('file-own.dot')
+    
+    
+    # reset full graph and from/to unknown values
+    G = backup.copy()
+    inputs[to_unknown_node] = old_to_inputs 
+    outputs[from_unknown_node] = old_from_outputs
+    
+    
+    # collapse OWN to a single node
+    print("Simplifying graph, collapsing all own nodes into a single one")
+    G.delete_subgraph("cluster_OWN")
+    G.add_subgraph(name=own_name, label="OWN", style="filled", fillcolor="lightgrey")
+    tmp_own_subgraph = G.get_subgraph(own_name)
+    tmp_own_subgraph.add_node("OWN")
+    set_balances("OWN")
+    for node in own_subgraph.nodes():
+        balances["OWN"] += balances[node]
+        
+    for edge in G.edges():
+        f,t = edge
+        if verbose:
+            print("Checking", f, "to",t)
+        from_own = True if f in own_nodes else False
+        from_third = True if f not in own_nodes else False
+        to_own = True if t in own_nodes else False
+        to_third = True if t not in own_nodes else False
+        count = edge.attr['count']
+        weight = edge.attr['weight']
+        if from_own and to_own:
+            if verbose:
+                print("from own and to own", f, t)
+            pass # noop
+        elif from_own and to_third:
+            append_edge(G, "OWN", t, float(weight), int(count))
+            outputs["OWN"] += float(weight)
+            if verbose:
+                print("Added", "OWN", "to", t, weight, count)
+        elif from_third and to_own:
+            append_edge(G, f, "OWN", float(weight), int(count))
+            inputs["OWN"] += float(weight)
+            if verbose:
+                print("Added", f, "to", "OWN", weight, count)
+        else:
+            if verbose:
+                print("from 3rd and to 3rd", f, t)
+            pass # noop
+    
+    for node in own_nodes:
+        G.delete_node(node)
+    set_node_labels(G, "OWN")
+    for edge in G.edges():
+        set_edge_labels(G, edge, ["OWN"], not_own_nodes)
+    
+    set_node_labels(G,to_unknown_node)
+    set_node_labels(G,from_unknown_node)
+
+    print("Writing file-simplified.dot")
+    G.write('file-simplified.dot')
 
     print('Finished')
   
