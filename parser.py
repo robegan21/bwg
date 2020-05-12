@@ -38,38 +38,51 @@ import urllib.request
 import time
 import math
 
-
+# wait 15 seconds per query to blockchain to not get banned
+min_request_delay = 15 
+last_request_time = time.time()
 lookup_addr_url= "https://blockchain.info/rawaddr/"
 lookup_tx_url = "https://blockchain.info/rawtx/"
+cache_dir = "data/addresses"
 
-satoshi = 100000000
-min_draw_val = 0.001
-min_request_delay = 15
-last_request_time = time.time()
+# constants and options
+satoshi = 100000000   # 100 M satoshi per BTC
+min_draw_val = 0.001  # minimum sum of transactions to add an edge to the graph (all transactions are always counted, just not drawn)
 display_len = 8
-by_wallet = True
-cluster_own = False
-cluster_thirdParty = True
+by_wallet = True      # if true all addresses in a wallet are a single node
+cluster_own = False   # do not constrain drawing of own wallets
+cluster_thirdParty = True  # group drawing of 3rd party wallets
 verbose = False
 debug_mode = False
+
+# whether to add suggestions for other addresses to be included in existing wallets
 suggest_irrelevant = False
 suggest_change = True
 suggest_thirdparty = False
 suggest_mergable = False
+
+# what labels to include
 label_3rdto3rd = True
 label_income = True
 label_expense = True
+
+# the maxumum day since epoch to include, or all if None
 max_date = None # 1587742790 / 3600.0 / 24.0 
 
 unknown = 'Not Tracked'
 COINBASE = "NEW COINBASE (Newly Generated Coins)"
 FEES = "TransactionFees"
 
+# global variables
 mergable_wallets = dict()
 inputs = dict()
 outputs = dict()
 balances = dict()
 transactions = dict()
+wallets = dict()
+rev_wallet = dict()
+addresses = dict()
+
 def get_tx(txid):
     if txid in transactions:
         return transactions[txid]
@@ -77,6 +90,10 @@ def get_tx(txid):
         return None
 
 def parse_tx(rawtx):
+    """
+    Takes a single raw json transaction and returns a tuple 
+    (ins=[], outs=[], fee=float, date=float)
+    """
     txid = rawtx['hash']
     if txid in transactions:
         return transactions[txid]
@@ -119,15 +136,12 @@ def parse_tx(rawtx):
         print("Skipping transaction after max_date(", max_date, "), :", inoutfeetime)
     return inoutfeetime
 
-wallets = dict()
-rev_wallet = dict()
 def add_to_wallet(wallet, addr):
     if not addr in wallets:
         wallets[wallet] = dict()
     wallets[wallet][addr] = True
     rev_wallet[addr] = wallet
     
-addresses = dict()
 def store_addr(addr, addr_json, wallet = None):
     assert( addr not in addresses )
     addresses[addr] = addr_json
@@ -142,6 +156,11 @@ def store_addr(addr, addr_json, wallet = None):
         add_to_wallet(wallet, addr)
     
 def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
+    """
+    looks up in local file cache or blockchain.com the transactions for address
+    stores in cache if blockchain.com returned data
+    """
+    
     global last_request_time
     if addr in addresses:            
         if verbose:
@@ -150,6 +169,9 @@ def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
     if not get_any_tx:
         store_addr(addr, dict(), wallet)
         return []
+    
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
     
     n_tx = 0
     all_txs = None
@@ -162,9 +184,9 @@ def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
         if offset > max_n_tx:
             break # blockchain won't respond to this excessively used addresses
 
-        cache = "data/addresses/%s.json" % (addr)
+        cache = cache_dir + "/%s.json" % (addr)
         if offset > 0:
-            cache = "data/addresses/%s-%d.json" % (addr,offset)
+            cache = cache_dir + "/%s-%d.json" % (addr,offset)
         if verbose:
             print ("Checking for cached addr:", addr , "at offset", offset, "in", cache)
     
@@ -211,7 +233,9 @@ def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
     
 
 def sanitize_addr(tx):
-    # sanitize for unknown
+    """
+    replaces address with a known wallet label or To/From unknown
+    """
     ins, outs, fee, time = tx
     ins2 = []
     outs2 = []
@@ -273,6 +297,11 @@ def sanitize_addr(tx):
     return (ins2, outs2, fee, time), from_self, to_self
 
 def record_balances(inaddr, outaddr, xferval, ownIn = False, ownOut = False):
+    """
+    tracks balance, inputs and outputs
+    only own addresses can have accurate numbers, as 3rd party wallets are largely unknown
+    """
+    
     if inaddr == outaddr:
         return
     if not unknown in inaddr:
@@ -293,6 +322,10 @@ def record_balances(inaddr, outaddr, xferval, ownIn = False, ownOut = False):
 
     
 def append_edge(G, inaddr, outaddr, xferval, count = 1):
+    """
+    Add an edge to the graph accumulate counet and weight attributes
+    """
+    
     G.add_edge(inaddr, outaddr)
     edge =  G.get_edge(inaddr, outaddr)
     # attributes are strings
@@ -306,6 +339,11 @@ def append_edge(G, inaddr, outaddr, xferval, count = 1):
 
 
 def add_tx_to_graph(G, txid):
+    """
+    Add all the micro transactions between the input(s) and output(s) to the graph
+    take care not to double count and report if important unknown addresses are included"
+    """
+    
     tx = transactions[txid]
     orig_in, orig_outs, fee, time = tx
     tx, from_self, to_self = sanitize_addr(tx)
@@ -420,6 +458,10 @@ def set_balances(wallet):
     outputs[wallet] = 0.0
 
 def set_node_labels(G, n):
+    """
+    Apply pretty labels to a node
+    """
+    
     node = G.get_node(n)
     is_own = str(n)[0] != '@'
     if True:
@@ -445,6 +487,10 @@ def set_node_labels(G, n):
         node.attr['color'] = 'blue'
 
 def set_edge_labels(G, e, own_nodes, not_own_nodes):
+    """
+    apply pretty lables to an edge
+    """
+    
     f,t = e
     from_own = True if f in own_nodes else False
     from_third = True if f in not_own_nodes else False
@@ -457,6 +503,7 @@ def set_edge_labels(G, e, own_nodes, not_own_nodes):
             e.attr['label'] = "%0.3f" % (float(e.attr['weight']))
             e.attr['fontcolor'] = 'purple'
         e.attr['color'] = 'purple'
+        e.attr['style'] = 'dashed'
     elif from_own and to_own :
         # Own to Own
         e.attr['style'] = "dotted"
@@ -473,8 +520,48 @@ def set_edge_labels(G, e, own_nodes, not_own_nodes):
             e.attr['fontcolor'] = 'red'
         e.attr['color'] = 'red'
     
+""" TODO
+import argparser
+def parse_args():
+    argparser = argparse.ArgumentParser(add_help=False)
+    
+    argparser.add_argument("wallets", metavar='N', type=str, nargs='+', help="List of wallet files (see below for naming scheme and how it affects display)")
+    argparser.add_argument("--min-draw", dest=min_draw_val, default=min_draw_val, type=int, help="Minimum sum of transactions to draw a link")
+    argparser.add_argument("--by-address", dest=by_wallet, default=True, const=False, type=bool, help="Nodes are by address, not grouped by wallet" )
+    argparser.add_argument("--verbose", dest=verbose, default=False, const=True, type=bool, help="Extra verbosity to print out transaction data while parsing")
+    argparser.add_argument("--debug", dest=debug_mode, default=False, const=True, type=bool, help="Additional debug information")
+    argparser.add_argument("--no-label-income", dest=label_income, default=True, const=False, type=bool, help="Do not label incoming transactions to own wallet")
+    argparser.add_argument("--no-label-outgoing", dest=label_expanse, default=True, const=False, type=bool, help="Do not label outgoing transactions from own wallet")
+    
+
+    options, unknown_options = argparser.parse_known_args()
+    if unknown_options is not None:
+        raise
+    return options
+"""
+
+def add_legend(G):
+    G.add_subgraph(name="cluster_LEGEND", label="Legend", rank="sink")
+    sg = G.get_subgraph("cluster_LEGEND")
+    sg.add_node("FromOwn", shape="plaintext", rankdir="LR")
+    sg.add_node("ToOwn  ", shape="plaintext", rankdir="LR")
+    sg.add_edge("FromOwn", "ToOwn  ", style="dotted", rankdir="LR")
+    
+    sg.add_node("FromOwn    ", shape="plaintext", rankdir="LR")
+    sg.add_node("To3rdParty ", shape="plaintext", rankdir="LR")   
+    sg.add_edge("FromOwn    ", "To3rdParty ", color="red", rankdir="LR")
+    
+    sg.add_node("From3rdParty ", shape="plaintext", rankdir="LR")
+    sg.add_node("ToOwn        ", shape="plaintext", rankdir="LR")
+    sg.add_edge("From3rdParty ","ToOwn        ",  color="green", rankdir="LR")
+    
+    
+    sg.add_node("From3rdParty", shape="plaintext", rankdir="LR")
+    sg.add_node("To3rdParty  ", shape="plaintext", rankdir="LR")
+    sg.add_edge("From3rdParty", "To3rdParty  ",  color="purple", style="dashed", rankdir="LR")
+
+
 if __name__ == "__main__":
-    # remove the .py from this script as the hipmer wrapper needs to be excecuted for proper environment variable detection
     args = sys.argv[1:]
     if not by_wallet:
         display_len = 50
@@ -489,6 +576,8 @@ if __name__ == "__main__":
     own_nodes = []
     not_own_nodes = []
     G = pgv.AGraph(directed=True, landscape=False)
+    
+    add_legend(G)
     
     own_name = "cluster_OWN"
     G.add_subgraph(name=own_name, label="OWN", style="filled", fillcolor="lightgrey")
@@ -509,7 +598,7 @@ if __name__ == "__main__":
     else:
         G.add_node(COINBASE, wallet=newcoin_wallet)
         
-    # untracked are in neither OWN nor ThirdParty
+    # untracked are in neither OWN nor ThirdParty; they are unknown
     G.add_node("From " + unknown, wallet="Untracked")
     set_balances("From " + unknown)
     from_unknown_node = G.get_node("From " + unknown)
@@ -517,7 +606,7 @@ if __name__ == "__main__":
     set_balances("To " + unknown)
     to_unknown_node = G.get_node("To " + unknown)
     
-    
+    # load all the wallets and addresses contained in the wallet files
     for f in args:
         print("Inspecting file: ", f);
         wallet = os.path.basename(f)
@@ -587,6 +676,7 @@ if __name__ == "__main__":
             n = G.get_node(wallet)
             n.attr['addresses'] = ",".join(wallet_addresses)
     
+    # apply all the recorded transactions to the graph
     for txid in transactions.keys():
         add_tx_to_graph(G, txid)
  
@@ -598,6 +688,7 @@ if __name__ == "__main__":
             print("Balance for", n, round(balances[n],3))
             set_node_labels(G, n)
     
+    # add edge labels
     for e in G.edges():
         set_edge_labels(G, e, own_nodes, not_own_nodes)
         
@@ -616,6 +707,7 @@ if __name__ == "__main__":
     
     print("Writing full graph: file.dot")
     G.write('file.dot')
+
     
     # cache full graph and from/to unknown values
     backup = G.copy()
@@ -663,6 +755,7 @@ if __name__ == "__main__":
     G.write('file-own.dot')
     
     
+    
     # reset full graph and from/to unknown values
     G = backup.copy()
     inputs[to_unknown_node] = old_to_inputs 
@@ -671,13 +764,15 @@ if __name__ == "__main__":
     
     # collapse OWN to a single node
     print("Simplifying graph, collapsing all own nodes into a single one")
+    total_bal = 0.0
+    set_balances("OWN")
+    for n in G.get_subgraph("cluster_OWN").nodes():
+        balances["OWN"] += balances[n]
     G.delete_subgraph("cluster_OWN")
     G.add_subgraph(name=own_name, label="OWN", style="filled", fillcolor="lightgrey")
     tmp_own_subgraph = G.get_subgraph(own_name)
     tmp_own_subgraph.add_node("OWN")
-    set_balances("OWN")
-    for node in own_subgraph.nodes():
-        balances["OWN"] += balances[node]
+    
         
     for edge in G.edges():
         f,t = edge
@@ -719,6 +814,7 @@ if __name__ == "__main__":
 
     print("Writing file-simplified.dot")
     G.write('file-simplified.dot')
+
 
     print('Finished')
   
