@@ -40,26 +40,27 @@ import math
 
 # wait 15 seconds per query to blockchain to not get banned
 min_request_delay = 15 
-last_request_time = time.time()
+last_request_time = time.time() - 14
 lookup_addr_url= "https://blockchain.info/rawaddr/"
 lookup_tx_url = "https://blockchain.info/rawtx/"
 cache_dir = "data/addresses"
 
 # constants and options
 satoshi = 100000000   # 100 M satoshi per BTC
-min_draw_val = 0.001  # minimum sum of transactions to add an edge to the graph (all transactions are always counted, just not drawn)
+min_draw_val = 0.0001  # minimum sum of transactions to add an edge to the graph (all transactions are always counted, just not drawn)
 display_len = 8
 by_wallet = True      # if true all addresses in a wallet are a single node
 cluster_own = False   # do not constrain drawing of own wallets
 cluster_thirdParty = True  # group drawing of 3rd party wallets
+save_addresses_in_dot = True
 verbose = False
 debug_mode = False
 
 # whether to add suggestions for other addresses to be included in existing wallets
 suggest_irrelevant = False
 suggest_change = True
-suggest_thirdparty = False
-suggest_mergable = False
+suggest_thirdparty = True
+suggest_mergable = True
 
 # what labels to include
 label_3rdto3rd = True
@@ -72,6 +73,7 @@ max_date = None # 1587742790 / 3600.0 / 24.0
 unknown = 'Not Tracked'
 COINBASE = "NEW COINBASE (Newly Generated Coins)"
 FEES = "TransactionFees"
+OWN = "Own"
 
 # global variables
 mergable_wallets = dict()
@@ -82,6 +84,15 @@ transactions = dict()
 wallets = dict()
 rev_wallet = dict()
 addresses = dict()
+def reset_global_state():
+    mergable_wallets.clear()
+    inputs.clear()
+    outputs.clear()
+    balances.clear()
+    transactions.clear()
+    wallets.clear()
+    rev_wallet.clear()
+    addresses.clear()
 
 def get_tx(txid):
     if txid in transactions:
@@ -268,7 +279,7 @@ def sanitize_addr(tx):
                         else:
                             mergable_wallets[known_in + " and " + addr] = True
                         if suggest_mergable:
-                            print("INFO: two OWN wallets share a transaction, this is okay but can be confusing:", addr, known_in, tx)
+                            print("INFO: two", OWN, "wallets share a transaction, this is okay but can be confusing:", addr, known_in, tx)
             else:
                 unknown_in.append(orig_addr)
                 addr = addr[0:display_len]
@@ -302,7 +313,7 @@ def record_balances(inaddr, outaddr, xferval, ownIn = False, ownOut = False):
     only own addresses can have accurate numbers, as 3rd party wallets are largely unknown
     """
     
-    if inaddr == outaddr:
+    if inaddr == outaddr or xferval == 0.0:
         return
     if not unknown in inaddr:
         balances[inaddr] -= xferval
@@ -438,7 +449,7 @@ def add_tx_to_graph(G, txid):
                     known_out[outaddr] = 0
                 known_out[outaddr] += xferval
                 
-            if xferval >= min_draw_val:
+            if xferval > 0 and xferval >= min_draw_val:
                 if verbose:
                     print("add edge", inaddr, outaddr, xferval)
                 append_edge(G, inaddr, outaddr, xferval)
@@ -449,7 +460,7 @@ def add_tx_to_graph(G, txid):
             
     print("Added a total of ", total_xfer, " for this set of edges from", known_in, "to", known_out)
 
-    if has_unknown is not None and total_xfer > min_draw_val:
+    if has_unknown is not None and total_xfer > 0 and total_xfer > min_draw_val:
         print("unknown", has_unknown, ": in=", known_in.keys(), " out=", known_out.keys(), "tx=", orig_in, " => ", orig_outs)
 
 def set_balances(wallet):
@@ -477,7 +488,7 @@ def set_node_labels(G, n):
 
         if is_own and unknown not in n:
             # only color own wallets
-            if balances[n] >= min_draw_val:
+            if balances[n] > 0 and balances[n] >= min_draw_val:
                 node.attr['color'] = 'green'
             elif round(balances[n],3) < 0.0:
                 node.attr['color'] = 'red'
@@ -560,11 +571,11 @@ def add_legend(G):
     sg.add_node("To3rdParty  ", shape="plaintext", rankdir="LR")
     sg.add_edge("From3rdParty", "To3rdParty  ",  color="purple", style="dashed", rankdir="LR")
 
-
-if __name__ == "__main__":
-    args = sys.argv[1:]
-    if not by_wallet:
-        display_len = 50
+  
+def process_wallets(output_file_name, wallet_files, collapse_own = False, only_own = False):
+    
+    reset_global_state()
+    print("Preparing graph for:", output_file_name, "collapse_own:", collapse_own, "only_own:", only_own, "wallet_files:", wallet_files)
     
     # special case of coinbase "address"
     newcoin_wallet = "@NewCoins"
@@ -575,12 +586,13 @@ if __name__ == "__main__":
 
     own_nodes = []
     not_own_nodes = []
+
     G = pgv.AGraph(directed=True, landscape=False)
     
     add_legend(G)
     
-    own_name = "cluster_OWN"
-    G.add_subgraph(name=own_name, label="OWN", style="filled", fillcolor="lightgrey")
+    own_name = "cluster_" + OWN
+    G.add_subgraph(name=own_name, label=OWN, style="filled", fillcolor="lightgrey")
     own_subgraph = G.get_subgraph(own_name)
 
     thirdParty_name = "ThirdParty"
@@ -606,20 +618,30 @@ if __name__ == "__main__":
     set_balances("To " + unknown)
     to_unknown_node = G.get_node("To " + unknown)
     
+    if collapse_own:
+        own_subgraph.add_node(OWN)
+        set_balances(OWN)
+        own_nodes.append(OWN)
+        
     # load all the wallets and addresses contained in the wallet files
-    for f in args:
+    for f in wallet_files:
         print("Inspecting file: ", f);
         wallet = os.path.basename(f)
         wallet, ignored = os.path.splitext(wallet)
     
         is_own = wallet[0] != '@'
-        topsubgraph = own_subgraph if is_own else thirdParty_subgraph
+        if only_own and not is_own:
+            print("Skipping ThirdParty file", f)
+            continue
         
-        # further subgraph is the wallet contains a dash
+        topsubgraph = own_subgraph if is_own else thirdParty_subgraph
+        subgraph = topsubgraph
+        
+        # further subgraph if the wallet contains a dash
         x = wallet.split('-')
-        if len(x) > 1:
+        if len(x) > 1 and not collapse_own:
             name_id, name = wallet.split('-')
-            if is_own and cluster_own:
+            if cluster_own and is_own:
                 # impose drawing restrictions
                 subgraph_name = "cluster_" + name
             elif cluster_thirdParty and not is_own:
@@ -628,21 +650,27 @@ if __name__ == "__main__":
                 subgraph_name = name
             subgraph = G.get_subgraph(subgraph_name)
             if subgraph is None:
-                subgraph = topsubgraph.add_subgraph(subgraph_name, name=subgraph_name, label=name)
-                print("Created subgraph", name, "within", "OWN" if is_own else "ThirdParty")
+                topsubgraph.add_subgraph(subgraph_name, name=subgraph_name, label=name)
+                subgraph = topsubgraph.get_subgraph(subgraph_name)
+                print("Created subgraph", name, "within", OWN if is_own else "ThirdParty")
             print("wallet", wallet, "is of subgraph", name)
-        else:
-            subgraph = topsubgraph
-            print("wallet", wallet, "is", "OWN" if is_own else "ThirdParty")
+
             
-        if by_wallet:
+        if is_own and collapse_own:
+            print("Collapsing wallet", wallet, "to", OWN)
+            wallet = OWN
+        elif by_wallet:
+            print("Adding wallet:", wallet)
             subgraph.add_node(wallet)
             set_balances(wallet)
             
+        if by_wallet:
             if is_own:
-                own_nodes.append(wallet)
+                if wallet not in own_nodes:
+                    own_nodes.append(wallet)
             else:
-                not_own_nodes.append(wallet)
+                if wallet not in not_own_nodes:
+                    not_own_nodes.append(wallet)
         
         wallet_addresses = []
         print("Opening f=", f, " wallet=", wallet)
@@ -672,9 +700,14 @@ if __name__ == "__main__":
                 else:
                     wallet_addresses.append(addr)
         
-        if by_wallet and len(wallet_addresses) > 0:
+        # save the addresses in the .dot file
+        if save_addresses_in_dot and by_wallet and len(wallet_addresses) > 0:
             n = G.get_node(wallet)
-            n.attr['addresses'] = ",".join(wallet_addresses)
+            if n.attr['addresses'] is not None:
+                n.attr['addresses'] += ","
+            else:
+                n.attr['addresses'] = ""
+            n.attr['addresses'] += ",".join(wallet_addresses)
     
     # apply all the recorded transactions to the graph
     for txid in transactions.keys():
@@ -694,9 +727,7 @@ if __name__ == "__main__":
         
     if verbose:
         print("Graph:", G)
-        print("\tnodes:", G.nodes)
         print("\tnodes.data:", G.nodes())
-        print("\tedges:", G.edges)
         print("\tedges.data:", G.edges())
     
     for mergable in mergable_wallets.keys():
@@ -705,117 +736,19 @@ if __name__ == "__main__":
     set_node_labels(G,to_unknown_node)
     set_node_labels(G,from_unknown_node)
     
-    print("Writing full graph: file.dot")
-    G.write('file.dot')
+    print("Writing full graph:", output_file_name)
+    G.write(output_file_name)
+    G.clear()
 
     
-    # cache full graph and from/to unknown values
-    backup = G.copy()
-    old_to_inputs = inputs[to_unknown_node]
-    old_from_outputs = outputs[from_unknown_node]
-
-    # remove all thirdparty nodes and create graph of just OWN connections
-    print("Removing all third party nodes from the graph")
-    
-    third_party_nodes = thirdParty_subgraph.nodes()
-    third_party_edges = G.edges(third_party_nodes)
-    
-    for edge in third_party_edges:
-        f,t = edge
-        count = edge.attr['count']
-        weight = edge.attr['weight']
-        if verbose:
-            print("Looking at ", f, t)
-        if f[0] != '@':
-            # from own
-            append_edge(G, f, to_unknown_node, float(weight), int(count))
-            inputs[to_unknown_node] += float(weight)
-            if verbose:
-                print("from own", f, float(weight))
-        if t[0] != '@':
-            # to own
-            append_edge(G, from_unknown_node, t, float(weight), int(count))
-            outputs[from_unknown_node] += float(weight)
-            if verbose:
-                print("to own", t, float(weight))
-
-    # remove the thirdparty subgraphs too
-    del_sub = G.get_subgraph("ThirdParty")
-
-    G.delete_subgraph(del_sub.name)
-    for node in third_party_nodes:
-        if verbose:
-            print("Deleting", node)
-        G.delete_node(node)
-    for edge in G.edges():
-        set_edge_labels(G, edge, own_nodes, [])
-    set_node_labels(G,to_unknown_node)
-    set_node_labels(G,from_unknown_node)
-    print("Writing file-own.dot")
-    G.write('file-own.dot')
-    
-    
-    
-    # reset full graph and from/to unknown values
-    G = backup.copy()
-    inputs[to_unknown_node] = old_to_inputs 
-    outputs[from_unknown_node] = old_from_outputs
-    
-    
-    # collapse OWN to a single node
-    print("Simplifying graph, collapsing all own nodes into a single one")
-    total_bal = 0.0
-    set_balances("OWN")
-    for n in G.get_subgraph("cluster_OWN").nodes():
-        balances["OWN"] += balances[n]
-    G.delete_subgraph("cluster_OWN")
-    G.add_subgraph(name=own_name, label="OWN", style="filled", fillcolor="lightgrey")
-    tmp_own_subgraph = G.get_subgraph(own_name)
-    tmp_own_subgraph.add_node("OWN")
-    
-        
-    for edge in G.edges():
-        f,t = edge
-        if verbose:
-            print("Checking", f, "to",t)
-        from_own = True if f in own_nodes else False
-        from_third = True if f not in own_nodes else False
-        to_own = True if t in own_nodes else False
-        to_third = True if t not in own_nodes else False
-        count = edge.attr['count']
-        weight = edge.attr['weight']
-        if from_own and to_own:
-            if verbose:
-                print("from own and to own", f, t)
-            pass # noop
-        elif from_own and to_third:
-            append_edge(G, "OWN", t, float(weight), int(count))
-            outputs["OWN"] += float(weight)
-            if verbose:
-                print("Added", "OWN", "to", t, weight, count)
-        elif from_third and to_own:
-            append_edge(G, f, "OWN", float(weight), int(count))
-            inputs["OWN"] += float(weight)
-            if verbose:
-                print("Added", f, "to", "OWN", weight, count)
-        else:
-            if verbose:
-                print("from 3rd and to 3rd", f, t)
-            pass # noop
-    
-    for node in own_nodes:
-        G.delete_node(node)
-    set_node_labels(G, "OWN")
-    for edge in G.edges():
-        set_edge_labels(G, edge, ["OWN"], not_own_nodes)
-    
-    set_node_labels(G,to_unknown_node)
-    set_node_labels(G,from_unknown_node)
-
-    print("Writing file-simplified.dot")
-    G.write('file-simplified.dot')
-
-
-    print('Finished')
   
 
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if not by_wallet:
+        display_len = 50
+    
+    process_wallets("mywallet.dot", args)
+    process_wallets("mywallet-own.dot", args, only_own = True)
+    process_wallets("mywallet-simplified.dot", args, collapse_own = True)
+    print('Finished')

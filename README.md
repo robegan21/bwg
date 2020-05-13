@@ -50,9 +50,9 @@ Presently options are not supported but will be soon.
 
 Outputs:
 ```
-file.dot
-file-own.dot
-file-simplified.dot
+mywallet.dot
+mywallet-own.dot
+mywaller-simplified.dot
 ```
 
 One can easily convert the text based dot format to pdf using any number of programs,
@@ -65,7 +65,11 @@ do
 done
 ```
 
-
+For example if one woudld like to model the first blocks and transactions on the
+bitcoin blockchain:
+```
+parser.py SatoshiThemselves/*.txt
+```
 
 ## File Formats
 
