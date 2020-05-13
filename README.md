@@ -71,6 +71,16 @@ bitcoin blockchain:
 parser.py example/SatoshiThemselves/*.txt
 ```
 
+## Requirements
+
+ * python3
+ * pygraphviz
+
+```
+pip3 install pygraphviz
+```
+
+
 ## File Formats
 
 parser.py accepts text files for a "wallet" with a list of bitcoin addresses
