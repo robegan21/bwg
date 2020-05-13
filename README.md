@@ -68,7 +68,7 @@ done
 For example if one woudld like to model the first blocks and transactions on the
 bitcoin blockchain:
 ```
-parser.py SatoshiThemselves/*.txt
+parser.py example/SatoshiThemselves/*.txt
 ```
 
 ## File Formats
