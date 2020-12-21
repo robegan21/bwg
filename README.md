@@ -61,14 +61,15 @@ I use the program from GraphViz, dot:
 ```
 for f in *.dot
 do
- dot -Tpdf -Gdpi=600 -o${f%.dot}.pdf 
+ dot -Tpdf -Gdpi=600 -o${f%.dot}.pdf $f
 done
 ```
 
 For example if one woudld like to model the first blocks and transactions on the
 bitcoin blockchain:
 ```
-parser.py example/SatoshiThemselves/*.txt
+cd example/SatoshiThemselves
+parser.py *.txt
 ```
 
 ## Requirements
