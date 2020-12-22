@@ -77,6 +77,7 @@ OWN = "Own"
 
 # global variables
 mergable_wallets = dict()
+suggest_additional_own_address = dict()
 inputs = dict()
 outputs = dict()
 balances = dict()
@@ -195,6 +196,7 @@ def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
         if offset > max_n_tx:
             break # blockchain won't respond to this excessively used addresses
 
+        print(addr, "offset=", offset)
         cache = cache_dir + "/%s.json" % (addr)
         if offset > 0:
             cache = cache_dir + "/%s-%d.json" % (addr,offset)
@@ -234,7 +236,7 @@ def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
             n_tx = addr_json['n_tx']
         if verbose:
             print("Found", addr, "with", n_tx, "transactions")
-    
+
     if n_tx < max_n_tx:
         assert(n_tx == addr_json['n_tx'])
         assert(n_tx == len(addr_json['txs']))
@@ -265,6 +267,7 @@ def sanitize_addr(tx):
             unknown_in.append(orig_addr)
         else:
             if addr in rev_wallet:
+                orig_addr = addr
                 addr = rev_wallet[addr]
                 if addr[0] != '@':
                     from_self = True
@@ -279,11 +282,16 @@ def sanitize_addr(tx):
                         else:
                             mergable_wallets[known_in + " and " + addr] = True
                         if suggest_mergable:
-                            print("INFO: two", OWN, "wallets share a transaction, this is okay but can be confusing:", addr, known_in, tx)
+                            print("INFO: Suggest MERGE two", OWN, "wallets share a transaction, this is okay but can be confusing:", orig_addr, addr, known_in, tx)
             else:
                 unknown_in.append(orig_addr)
                 addr = addr[0:display_len]
         ins2.append((addr, val))
+    if known_in is not None:
+        for i in ins:
+            addr, val = i
+            if not addr in rev_wallet:
+                suggest_additional_own_address[addr] = known_in
     for i in outs:
         addr, val = i
         orig_addr = addr
@@ -749,6 +757,8 @@ if __name__ == "__main__":
         display_len = 50
     
     process_wallets("mywallet.dot", args)
+    for i in suggest_additional_own_address:
+        print("INFO: Suggest ADD ", i, " to wallet ", suggest_additional_own_address[i])
     process_wallets("mywallet-own.dot", args, only_own = True)
     process_wallets("mywallet-simplified.dot", args, collapse_own = True)
     print('Finished')
