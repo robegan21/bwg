@@ -60,7 +60,7 @@ debug_mode = False
 suggest_irrelevant = False
 suggest_change = True
 suggest_thirdparty = True
-suggest_mergable = True
+suggest_mergable = False
 
 # what labels to include
 label_3rdto3rd = True
@@ -231,15 +231,18 @@ def load_addr(addr, wallet = None, get_all_tx = True, get_any_tx = True):
                 all_txs.extend(tmp_addr_json['txs'])
                 addr_json['txs'] = all_txs
                 
+        assert(addr_json is not None)
         offset += len(tmp_addr_json['txs'])
         if n_tx == 0:
             n_tx = addr_json['n_tx']
         if verbose:
             print("Found", addr, "with", n_tx, "transactions")
+        if n_tx == 0:
+            break
 
     if n_tx < max_n_tx:
         assert(n_tx == addr_json['n_tx'])
-        assert(n_tx == len(addr_json['txs']))
+        assert(n_tx == 0 or n_tx == len(addr_json['txs']))
     store_addr(addr, addr_json, wallet)
 
     return addresses[addr]['txs']
@@ -685,6 +688,7 @@ def process_wallets(output_file_name, wallet_files, collapse_own = False, only_o
         with open(f) as fh:
             for addr in fh.readlines():
                 addr = addr.strip();            
+                print(addr)
                 get_all_tx = True
                 get_any_tx = True
                 if addr[0] == '#':
@@ -739,7 +743,7 @@ def process_wallets(output_file_name, wallet_files, collapse_own = False, only_o
         print("\tedges.data:", G.edges())
     
     for mergable in mergable_wallets.keys():
-        print("Simplification suggestion merge these OWN wallets:", mergable)
+        print("INFO: Suggest MERGE these OWN wallets:", mergable)
     
     set_node_labels(G,to_unknown_node)
     set_node_labels(G,from_unknown_node)
